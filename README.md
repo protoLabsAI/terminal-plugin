@@ -20,6 +20,10 @@ Install into any protoAgent agent from this git URL — it's not tied to one age
 - **protoAgent theming** — the xterm theme (background/foreground/cursor/selection +
   the 16 ANSI colours) is built from the console's `--pl-*` tokens on the DS-kit
   handshake and re-applied on every live re-theme.
+- **Crisp block art** — the canvas renderer with `customGlyphs` draws block/box-drawing
+  glyphs as exact cell-filling shapes, so contiguous block art (e.g. the Claude Code
+  splash) renders **flush, no seams** (the default DOM renderer draws them from the
+  font, which leaves gaps).
 
 ## Security — read this before enabling
 
