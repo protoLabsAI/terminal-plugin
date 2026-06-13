@@ -12,6 +12,7 @@ requires-python = ">=3.11"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+timeout = 60               # no test may hang (these drive PTYs + a WS) — fail with a traceback
 
 [tool.ruff]
 line-length = 120

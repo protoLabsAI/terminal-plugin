@@ -12,6 +12,7 @@ on:
 jobs:
   test:
     runs-on: ${{ vars.NSC_RUNNER || 'namespace-profile-protolabs-linux' }}
+    timeout-minutes: 8   # safety net — these tests drive real PTYs + a WebSocket
     steps:
       - uses: actions/checkout@v4
 
