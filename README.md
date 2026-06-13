@@ -11,6 +11,9 @@ Install into any protoAgent agent from this git URL — it's not tied to one age
 
 - A left-rail **Terminal** view (ADR 0026) — an xterm.js page (fit + clickable-links
   addons) served by the plugin, connected to a shell over a WebSocket.
+- **Tabs** — run several sessions in one view (+ to add, × to close, double-click to
+  rename). Each tab owns its own xterm + WebSocket, and each WebSocket gets its own
+  PTY shell — closing a tab kills only that shell.
 - A **real PTY** on the backend — stdlib `pty` (no pip deps), so it's a genuine
   interactive shell: TUIs, colour, resize, `Ctrl-C`, the works. The wire protocol
   mirrors protoMaker's terminal (`data`/`exit`/`connected` ⇄ `input`/`resize`/`ping`).
@@ -87,8 +90,8 @@ Then open the **Terminal** rail icon. (Make sure the host has an operator bearer
 
 ## Roadmap
 
-A solid single terminal session per view. Possible next steps: multi-session tabs,
-split panes, a search overlay, and validating the experimental Windows backend. PRs welcome.
+Multi-session tabs, a real PTY, themed + offline. Possible next steps: split panes, a
+search overlay, and validating the experimental Windows backend. PRs welcome.
 
 Enabled by default once installed (the WS bearer gate is the protection) — disable
 with `plugins.disabled: [terminal]`.

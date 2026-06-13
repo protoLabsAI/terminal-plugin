@@ -54,6 +54,15 @@ def test_view_page_pulls_in_the_protoagent_theme_and_four_rules():
     assert "options.theme" in PAGE  # re-applies the theme, not just on first paint
 
 
+def test_view_page_has_multi_session_tabs():
+    from terminal.view import PAGE
+
+    # a tab bar + per-session lifecycle (each tab owns its own xterm + WS → its own PTY)
+    assert 'id="tabs"' in PAGE and 'id="newtab"' in PAGE
+    assert "newSession" in PAGE and "closeSession" in PAGE and "switchTo" in PAGE
+    assert "const sessions = new Map()" in PAGE  # the session registry
+
+
 def test_register_mounts_the_public_router(registry):
     import terminal
 
