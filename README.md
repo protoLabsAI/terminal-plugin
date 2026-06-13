@@ -22,7 +22,10 @@ Install into any protoAgent agent from this git URL — it's not tied to one age
 
 A terminal is **interactive shell access on the host**. This plugin:
 
-- **Ships DISABLED.** Enabling it is a deliberate trust decision (install ≠ enable).
+- **Enabled by default** — once installed it's on. That's safe because the WebSocket
+  is bearer-gated (below) and protoAgent only binds a non-loopback interface when a
+  token is set, so an un-gated shell is always loopback-local. Disable it explicitly
+  (`plugins.disabled: [terminal]`) if you don't want a terminal.
 - **Gates the WebSocket on the operator bearer.** The page gets the bearer from the
   DS-kit handshake and opens `…/ws?token=<bearer>`; the server verifies it against the
   host's configured token (`auth.token` / `A2A_AUTH_TOKEN`) — the same token the
@@ -42,19 +45,24 @@ A terminal is **interactive shell access on the host**. This plugin:
 - No pip deps (the PTY is stdlib). xterm.js loads from jsDelivr — needs network at
   view-load time (vendoring is a planned follow-up for airgapped installs).
 
-## Install
+## Install — no restart needed
+
+Easiest: the console **Plugins** panel — paste the git URL, install. It's enabled by
+default, its router **hot-mounts** (#822), and the **Terminal** rail icon appears from
+runtime-status without a console rebuild (#853). No restart.
+
+Or from the CLI against a running server:
 
 ```bash
-python -m server plugin install https://github.com/protoLabsAI/terminal-plugin --ref main
-python -m server plugin enable terminal          # the trust decision; then restart
+python -m server plugin install https://github.com/protoLabsAI/terminal-plugin --ref v0.1.1
+# then pick it up live: hit "Sync" in the console Plugins panel, or have the agent call
+# reload_plugins (plugin-devkit). It hot-mounts — no restart.
 ```
 
-Then in `config/langgraph-config.yaml`:
+Optional config in `config/langgraph-config.yaml` (all have sane defaults):
 
 ```yaml
-plugins:
-  enabled: [terminal]
-
+# enabled by default; to turn it OFF: plugins: { disabled: [terminal] }
 terminal:
   shell: ""        # blank → $SHELL, then /bin/bash
   cwd: ""          # blank → the server's cwd
@@ -62,8 +70,8 @@ terminal:
   font_size: 13
 ```
 
-Open the **Terminal** rail icon. (Make sure the host has an operator bearer set —
-`auth.token` or `A2A_AUTH_TOKEN` — before exposing the port.)
+Then open the **Terminal** rail icon. (Make sure the host has an operator bearer set —
+`auth.token` or `A2A_AUTH_TOKEN` — before binding a non-loopback interface.)
 
 ## Layout
 

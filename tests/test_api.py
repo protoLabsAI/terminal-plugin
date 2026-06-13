@@ -12,7 +12,10 @@ from terminal import api
 
 def _app(cfg=None):
     app = FastAPI()
-    app.include_router(api.build_router(cfg or {"shell": "/bin/sh", "cwd": "/"}), prefix="/plugins/terminal")
+    # `cat` echoes its stdin deterministically (no shell prompt/init/echo race), so the
+    # WS round-trip is stable across platforms — the shell behaviour itself is covered
+    # by test_pty_session against /bin/sh.
+    app.include_router(api.build_router(cfg or {"shell": "/bin/cat"}), prefix="/plugins/terminal")
     return app
 
 
@@ -69,10 +72,10 @@ def test_ws_accepts_the_matching_token(monkeypatch):
 
 def test_ws_round_trip_with_a_real_shell(monkeypatch):
     monkeypatch.delenv("A2A_AUTH_TOKEN", raising=False)  # no token → open
-    c = TestClient(_app({"shell": "/bin/sh", "cwd": "/"}))
+    c = TestClient(_app({"shell": "/bin/cat"}))  # cat echoes input deterministically
     with c.websocket_connect("/plugins/terminal/ws") as ws:
         assert ws.receive_json()["type"] == "connected"
-        ws.send_json({"type": "input", "data": "echo ws_marker_42\n"})
+        ws.send_json({"type": "input", "data": "ws_marker_42\n"})
         got = ""
         for _ in range(300):
             m = ws.receive_json()

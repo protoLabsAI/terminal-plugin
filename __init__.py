@@ -4,7 +4,8 @@
 view page (an iframe page-load can't carry a bearer, so the page must be public) and
 the WebSocket, which verifies the operator bearer itself from a ``?token=`` query
 param (a browser WS can't set an Authorization header). No tools — it's a view + a
-PTY bridge. Ships DISABLED: enabling grants interactive shell access on the host.
+PTY bridge. Enabled by default — the WS bearer gate is the protection, and an un-gated
+shell is only ever loopback-local (protoAgent requires a token to bind non-loopback).
 """
 
 from __future__ import annotations
