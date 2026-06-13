@@ -22,7 +22,7 @@ from pathlib import Path
 
 from fastapi import WebSocket  # module-level so the websocket route's annotation resolves
 
-from .pty_session import PtySession
+from .pty_session import open_session
 from .view import PAGE
 
 log = logging.getLogger("protoagent.plugins.terminal")
@@ -106,7 +106,7 @@ async def _bridge(ws, *, shell: str, cwd: str) -> None:
     """Bridge a WebSocket to a fresh PTY for its lifetime."""
     from fastapi import WebSocketDisconnect
 
-    sess = PtySession(shell=shell, cwd=cwd, scrub_env=scrub_keys())
+    sess = open_session(shell=shell, cwd=cwd, scrub_env=scrub_keys())
     try:
         sess.start()
     except Exception as exc:  # noqa: BLE001

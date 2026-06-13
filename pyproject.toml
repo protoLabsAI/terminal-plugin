@@ -1,12 +1,12 @@
 [project]
 name = "terminal-plugin"
-version = "0.2.0"            # keep in lockstep with protoagent.plugin.yaml (a test enforces it)
+version = "0.3.0"            # keep in lockstep with protoagent.plugin.yaml (a test enforces it)
 description = "A full terminal (xterm.js + a real PTY over WebSocket) as a protoAgent console plugin."
 requires-python = ">=3.11"
 
-# No runtime pip deps: the PTY backend is stdlib (pty/os/fcntl/termios), the host
-# (protoAgent) provides fastapi + langchain-core, and xterm.js is VENDORED + served
-# locally (offline — no CDN). The only OS requirement is a Unix PTY (Linux/macOS).
+# Linux/macOS: no runtime pip deps — the PTY backend is stdlib (pty/os/fcntl/termios),
+# the host provides fastapi + langchain-core, and xterm.js is VENDORED + served locally
+# (offline). Windows is EXPERIMENTAL and needs pywinpty (manifest requires_pip).
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

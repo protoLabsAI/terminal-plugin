@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import asyncio
 
-from terminal.pty_session import PtySession, default_shell
+import pytest
+
+from terminal.pty_session import PtyError, PtySession, WinPtySession, default_shell, open_session
 
 
 async def _read_until(sess, marker: str, timeout: float = 8.0) -> bytes:
@@ -74,3 +76,22 @@ async def test_read_returns_empty_and_reaps_on_shell_exit():
         assert s.poll() is not None  # the child exited → reaped, exit code known
     finally:
         await s.aclose()
+
+
+# ── backend selection + the Windows (pywinpty) backend ──────────────────────────
+
+
+def test_open_session_picks_posix_on_this_platform():
+    # The suite runs on Linux/macOS → the POSIX backend.
+    assert isinstance(open_session(shell="/bin/sh"), PtySession)
+
+
+def test_winpty_build_env_and_missing_dep():
+    s = WinPtySession(scrub_env=["SECRET_API_KEY"], env_overrides={"FOO": "bar"})
+    env = s._build_env()
+    assert env["TERM"] == "xterm-256color" and env["FOO"] == "bar"
+    assert "SECRET_API_KEY" not in env
+    # pywinpty isn't installed off Windows → start() raises a clear PtyError (not a raw
+    # ImportError), so the bridge surfaces a useful message.
+    with pytest.raises(PtyError):
+        s.start()
