@@ -46,6 +46,8 @@ def test_view_page_pulls_in_the_protoagent_theme_and_four_rules():
     # the terminal itself: VENDORED xterm (offline — no CDN) + the WS to the PTY bridge.
     assert "/plugins/terminal/static/" in PAGE and "xterm.js" in PAGE and "new Terminal(" in PAGE
     assert "cdn.jsdelivr" not in PAGE and "https://" not in PAGE  # fully self-served, no CDN
+    # the CANVAS renderer + customGlyphs is what makes block/box art render flush.
+    assert "CanvasAddon" in PAGE and "customGlyphs" in PAGE
     assert "/plugins/terminal/ws?token=" in PAGE
     # THE theme requirement: xterm's theme is built from protoAgent's --pl-* tokens,
     # and re-applied live on a re-theme (MutationObserver on :root).

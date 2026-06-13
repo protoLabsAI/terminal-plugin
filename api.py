@@ -34,6 +34,7 @@ _VENDOR_TYPES = {
     "xterm.css": "text/css",
     "addon-fit.js": "application/javascript",
     "addon-web-links.js": "application/javascript",
+    "addon-canvas.js": "application/javascript",
 }
 
 

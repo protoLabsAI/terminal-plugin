@@ -89,13 +89,18 @@ function loadScript(src){
   });
 }
 const ST = BASE + "/plugins/terminal/static/";
-let Terminal, FitAddon, WebLinksAddon;
+let Terminal, FitAddon, WebLinksAddon, CanvasAddon;
 try {
   await loadScript(ST + "xterm.js");
-  await Promise.all([loadScript(ST + "addon-fit.js"), loadScript(ST + "addon-web-links.js")]);
+  await Promise.all([
+    loadScript(ST + "addon-fit.js"),
+    loadScript(ST + "addon-web-links.js"),
+    loadScript(ST + "addon-canvas.js"),
+  ]);
   Terminal = window.Terminal;
   FitAddon = window.FitAddon.FitAddon;
   WebLinksAddon = window.WebLinksAddon.WebLinksAddon;
+  CanvasAddon = window.CanvasAddon.CanvasAddon;
 } catch (e) {
   document.getElementById("err").hidden = false;
   document.getElementById("err").textContent = "Could not load the terminal assets. " + e;
@@ -179,14 +184,26 @@ function connect(s){
   s.ws.onerror = () => { s.status = "error"; s.statusCls = "bad"; if (s.id === activeId) setStatus("error", "bad"); };
 }
 
+// Resolve the mono font CONCRETELY: the canvas renderer builds a canvas font string,
+// which can't resolve a CSS var() — so read --pl-font-mono now and append fallbacks.
+const monoVar = css("--pl-font-mono", "").replace(/['"]/g, "").trim();
+const MONO = (monoVar ? monoVar + ", " : "") + "Menlo, Monaco, 'Courier New', monospace";
+
 function newSession(){
   const id = "t" + (++counter);
   const el = document.createElement("div"); el.className = "termpane"; el.dataset.id = id; $("terms").appendChild(el);
   const term = new Terminal({
     cursorBlink: true, fontSize: 13, scrollback: 5000, allowProposedApi: true,
-    fontFamily: "var(--pl-font-mono), Menlo, Monaco, 'Courier New', monospace", theme: xtermTheme(),
+    fontFamily: MONO,
+    lineHeight: 1.0,        // flush rows
+    customGlyphs: true,     // draw block/box glyphs as exact cell-filling shapes (needs canvas/webgl)
+    theme: xtermTheme(),
   });
   const fitA = new FitAddon(); term.loadAddon(fitA); term.loadAddon(new WebLinksAddon()); term.open(el);
+  // The CANVAS renderer is what makes customGlyphs work — block/box art renders flush
+  // (the default DOM renderer draws them from the font, which leaves seams). Best-effort:
+  // a renderer failure just falls back to the DOM renderer.
+  try { term.loadAddon(new CanvasAddon()); } catch (e) {}
   const s = { id, name: "Terminal " + counter, term, fit: fitA, ws: null, el, status: "connecting…", statusCls: "", exited: false, meta: "" };
   term.onData((d) => { if (s.ws && s.ws.readyState === 1) s.ws.send(JSON.stringify({ type: "input", data: d })); });
   sessions.set(id, s);
