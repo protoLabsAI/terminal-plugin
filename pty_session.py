@@ -1,22 +1,31 @@
-"""A PTY-backed shell session — stdlib only (``pty``/``os``/``fcntl``/``termios``),
-Unix-first (Linux/macOS).
+"""A PTY-backed shell session.
 
-No protoAgent host imports and no pip deps, so the suite spawns real PTYs in CI. The
-session owns a child shell behind a pseudo-terminal: read its output off the master
-fd (in a thread, so the event loop never blocks), write keystrokes to it, resize it
-(``TIOCSWINSZ``), and reap the process group on close.
+Two backends behind one interface (start / read / write / resize / poll / aclose):
+- ``PtySession`` — POSIX (Linux/macOS), stdlib only (``pty``/``os``/``fcntl``/
+  ``termios``); no pip deps, so the suite spawns real PTYs in CI.
+- ``WinPtySession`` — Windows, via the optional ``pywinpty`` package (EXPERIMENTAL,
+  untested in our Linux CI — see ``requires_pip`` in the manifest).
+
+``open_session(...)`` picks the right backend for the platform. The POSIX session owns
+a child shell behind a pseudo-terminal: read its output off the master fd (in a thread,
+so the loop never blocks), write keystrokes, resize (``TIOCSWINSZ``), reap the group.
 """
 
 from __future__ import annotations
 
 import asyncio
 import errno
-import fcntl
 import os
-import pty
 import signal
 import struct
-import termios
+import sys
+
+# Unix PTY primitives — guarded so the module still imports on Windows (which uses the
+# pywinpty backend). The POSIX PtySession references these only at runtime, on POSIX.
+if sys.platform != "win32":
+    import fcntl
+    import pty
+    import termios
 
 # Default TERM env so colour + 256-colour CLIs behave inside the terminal.
 _TERM_ENV = {
@@ -188,3 +197,104 @@ class PtySession:
             self.pid = None
         except OSError:
             self.pid = None
+
+
+class WinPtySession:
+    """Windows backend via the optional ``pywinpty`` package — EXPERIMENTAL (untested
+    in our Linux CI; needs a Windows validator). Same interface as ``PtySession``,
+    but on top of ``winpty.PtyProcess`` (method-based read/write, not an fd)."""
+
+    def __init__(
+        self,
+        *,
+        shell: str = "",
+        cwd: str = "",
+        cols: int = 80,
+        rows: int = 24,
+        env_overrides: dict[str, str] | None = None,
+        scrub_env: list[str] | None = None,
+    ):
+        self.shell = shell or os.environ.get("COMSPEC") or "cmd.exe"
+        self.cwd = cwd or os.getcwd()
+        self.cols = max(1, int(cols))
+        self.rows = max(1, int(rows))
+        self._env_overrides = env_overrides or {}
+        self._scrub_env = set(scrub_env or [])
+        self.pid: int | None = None
+        self._proc = None
+        self._exit_code: int | None = None
+
+    def _build_env(self) -> dict[str, str]:
+        env = {k: v for k, v in os.environ.items() if k not in self._scrub_env}
+        env.update(_TERM_ENV)
+        env.update(self._env_overrides)
+        return env
+
+    def start(self) -> None:
+        try:
+            from winpty import PtyProcess  # optional dep (requires_pip on Windows)
+        except ImportError as exc:
+            raise PtyError("pywinpty not installed — `pip install pywinpty` (Windows)") from exc
+        self._proc = PtyProcess.spawn(
+            self.shell, cwd=self.cwd or None, env=self._build_env(), dimensions=(self.rows, self.cols)
+        )
+        self.pid = getattr(self._proc, "pid", None)
+
+    async def read(self, n: int = 65536) -> bytes:
+        if self._proc is None:
+            return b""
+        loop = asyncio.get_running_loop()
+        try:
+            data = await loop.run_in_executor(None, self._proc.read, n)
+        except EOFError:
+            return b""
+        except Exception:  # noqa: BLE001 — treat any read failure as EOF
+            return b""
+        if not data:
+            return b""
+        return data.encode("utf-8", "replace") if isinstance(data, str) else data
+
+    def write(self, data: str | bytes) -> None:
+        if self._proc is None:
+            return
+        if isinstance(data, bytes):
+            data = data.decode("utf-8", "replace")
+        try:
+            self._proc.write(data)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def resize(self, cols: int, rows: int) -> None:
+        self.cols, self.rows = max(1, int(cols)), max(1, int(rows))
+        if self._proc is None:
+            return
+        try:
+            self._proc.setwinsize(self.rows, self.cols)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def poll(self) -> int | None:
+        if self._proc is None:
+            return self._exit_code
+        try:
+            if self._proc.isalive():
+                return None
+            self._exit_code = self._proc.exitstatus
+        except Exception:  # noqa: BLE001
+            pass
+        return self._exit_code
+
+    async def aclose(self) -> int | None:
+        if self._proc is not None:
+            try:
+                self._proc.terminate(force=True)
+            except Exception:  # noqa: BLE001
+                pass
+            self._proc = None
+        return self._exit_code
+
+
+def open_session(**kw):
+    """Construct the right PTY session for the platform: ``WinPtySession`` on Windows
+    (pywinpty), else the POSIX ``PtySession``."""
+    return WinPtySession(**kw) if sys.platform == "win32" else PtySession(**kw)

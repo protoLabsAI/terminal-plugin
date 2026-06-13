@@ -41,9 +41,11 @@ A terminal is **interactive shell access on the host**. This plugin:
 ## Requirements
 
 - **protoAgent ≥ 0.27.0** (console views + WebSocket-through-the-fleet-proxy, #883).
-- A **Unix PTY** (Linux/macOS). Windows is not supported (no `pywinpty` yet).
-- No pip deps (the PTY is stdlib). xterm.js + addons are **vendored** (`vendor/`) and
-  served locally by the plugin — **works offline / airgapped**, no CDN.
+- **Linux/macOS** — stdlib PTY, no pip deps. **Windows is EXPERIMENTAL** (untested in
+  CI): it uses `pywinpty` — `python -m server plugin install-deps terminal` on Windows,
+  then validate. The POSIX path is the supported, tested one.
+- xterm.js + addons are **vendored** (`vendor/`) and served locally by the plugin —
+  **works offline / airgapped**, no CDN.
 
 ## Install — no restart needed
 
@@ -77,15 +79,16 @@ Then open the **Terminal** rail icon. (Make sure the host has an operator bearer
 
 | File | What |
 |---|---|
-| `pty_session.py` | the stdlib-`pty` shell session (spawn / read / write / resize / reap) |
-| `api.py` | the router: the public `/view` page + the bearer-gated `/ws` PTY bridge |
+| `pty_session.py` | the PTY shell session: POSIX (stdlib `pty`) + Windows (`pywinpty`, experimental) behind `open_session()` |
+| `api.py` | the router: the public `/view` page, vendored `/static/*` assets, the bearer-gated `/ws` PTY bridge |
 | `view.py` | the xterm.js page — four rules + the `--pl-*` → xterm theme mapping |
+| `vendor/` | the vendored xterm.js + addons + css (served offline) |
 | `__init__.py` | `register()` — mounts the one router |
 
 ## Roadmap
 
 A solid single terminal session per view. Possible next steps: multi-session tabs,
-split panes, a search overlay, Windows (`pywinpty`). PRs welcome.
+split panes, a search overlay, and validating the experimental Windows backend. PRs welcome.
 
 Enabled by default once installed (the WS bearer gate is the protection) — disable
 with `plugins.disabled: [terminal]`.

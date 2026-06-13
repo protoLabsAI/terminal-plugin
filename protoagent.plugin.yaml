@@ -1,6 +1,6 @@
 id: terminal
 name: Terminal
-version: 0.2.0
+version: 0.3.0
 description: >-
   A full terminal in the protoAgent console — an xterm.js view wired to a real PTY
   shell over a WebSocket. The terminal is themed from the protoAgent design system
@@ -12,6 +12,11 @@ description: >-
 enabled: true
 repository: https://github.com/protoLabsAI/terminal-plugin
 min_protoagent_version: "0.27.0"   # plugin console views (ADR 0026) + WS-through-proxy (#883)
+
+# Linux/macOS use the stdlib PTY (no deps). Windows is EXPERIMENTAL (untested in CI)
+# and needs pywinpty — declared, NOT auto-installed (install-deps it on Windows).
+requires_pip:
+  - "pywinpty>=2.0; sys_platform == 'win32'"
 
 config_section: terminal
 config:
