@@ -1,14 +1,15 @@
 id: terminal
 name: Terminal
-version: 0.1.0
+version: 0.1.1
 description: >-
   A full terminal in the protoAgent console — an xterm.js view wired to a real PTY
   shell over a WebSocket. The terminal is themed from the protoAgent design system
   (it reads the console's --pl-* tokens and re-themes live). The WebSocket is gated
   by the operator bearer (the same token the console uses), so only the authenticated
-  operator gets a shell. Ships DISABLED — enabling it grants the operator interactive
-  shell access on the host, so it's a deliberate trust decision.
-enabled: false
+  operator gets a shell. Enabled by default: the bearer gate is the real protection,
+  and protoAgent only binds non-loopback when a token is set — so an un-gated shell is
+  always loopback-local. (Disable it explicitly if you don't want a terminal.)
+enabled: true
 repository: https://github.com/protoLabsAI/terminal-plugin
 min_protoagent_version: "0.27.0"   # plugin console views (ADR 0026) + WS-through-proxy (#883)
 

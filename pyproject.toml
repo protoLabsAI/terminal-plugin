@@ -1,6 +1,6 @@
 [project]
 name = "terminal-plugin"
-version = "0.1.0"            # keep in lockstep with protoagent.plugin.yaml (a test enforces it)
+version = "0.1.1"            # keep in lockstep with protoagent.plugin.yaml (a test enforces it)
 description = "A full terminal (xterm.js + a real PTY over WebSocket) as a protoAgent console plugin."
 requires-python = ">=3.11"
 

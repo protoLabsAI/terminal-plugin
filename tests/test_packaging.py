@@ -18,7 +18,7 @@ def _manifest():
 def test_manifest_shape():
     m = _manifest()
     assert m["id"] == "terminal"
-    assert m["enabled"] is False  # ships DISABLED — enabling grants shell access
+    assert m["enabled"] is True  # on by default — the WS bearer gate is the protection
     assert m["config_section"] == "terminal"
     for key in ("shell", "cwd"):
         assert key in m["config"]
