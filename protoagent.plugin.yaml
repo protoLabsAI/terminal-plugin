@@ -1,6 +1,6 @@
 id: terminal
 name: Terminal
-version: 0.1.1
+version: 0.2.0
 description: >-
   A full terminal in the protoAgent console — an xterm.js view wired to a real PTY
   shell over a WebSocket. The terminal is themed from the protoAgent design system
@@ -33,5 +33,5 @@ views:
 
 # Declarative transparency (surfaced in the console; not enforced).
 capabilities:
-  network: ["cdn.jsdelivr.net"]   # xterm.js + addons are loaded from jsDelivr (v1; vendoring is a follow-up)
+  network: []                     # none — xterm.js + addons are VENDORED + served locally (offline)
   filesystem: full                # it spawns an interactive shell — full host access for the operator

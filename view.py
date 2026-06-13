@@ -20,15 +20,18 @@ from __future__ import annotations
 PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Terminal</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
 <script>
   // RULE 3 — slug-aware base: "" on the host window, "/agents/<slug>" through the
   // fleet proxy. Split on the prefix this page is served under; every asset + the WS
   // URL hangs off it.
   var BASE = location.pathname.split("/plugins/")[0];
-  // RULE 4 — link the DS kit CSS off BASE so the chrome themes live off --pl-* tokens.
-  (function(){ var l=document.createElement("link"); l.rel="stylesheet";
-    l.href=BASE+"/_ds/plugin-kit.css"; document.head.appendChild(l); })();
+  // Stylesheets, BASE-prefixed: the VENDORED xterm css (offline — served by this
+  // plugin, no CDN) and RULE 4's DS kit css (so the chrome themes off --pl-* tokens).
+  (function(){
+    ["/plugins/terminal/static/xterm.css", "/_ds/plugin-kit.css"].forEach(function(p){
+      var l=document.createElement("link"); l.rel="stylesheet"; l.href=BASE+p; document.head.appendChild(l);
+    });
+  })();
 </script>
 <style>
   *{box-sizing:border-box}
@@ -66,14 +69,27 @@ let kit;
 try { kit = await import(BASE + "/_ds/plugin-kit.js"); }
 catch (e) { kit = { initPluginView(cb){ cb && cb(); }, getToken(){ return ""; } }; }
 
+// Load the VENDORED xterm UMD bundles (served by this plugin — offline, no CDN), then
+// read their globals: xterm's UMD spreads its exports onto window (→ window.Terminal);
+// the addons expose window.<Name>.<Name>.
+function loadScript(src){
+  return new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = src; s.onload = res; s.onerror = () => rej(new Error("failed to load " + src));
+    document.head.appendChild(s);
+  });
+}
+const ST = BASE + "/plugins/terminal/static/";
 let Terminal, FitAddon, WebLinksAddon;
 try {
-  ({ Terminal } = await import("https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/+esm"));
-  ({ FitAddon } = await import("https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/+esm"));
-  ({ WebLinksAddon } = await import("https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/+esm"));
+  await loadScript(ST + "xterm.js");  // defines the globals the addons attach to
+  await Promise.all([loadScript(ST + "addon-fit.js"), loadScript(ST + "addon-web-links.js")]);
+  Terminal = window.Terminal;
+  FitAddon = window.FitAddon.FitAddon;
+  WebLinksAddon = window.WebLinksAddon.WebLinksAddon;
 } catch (e) {
   document.getElementById("err").hidden = false;
-  document.getElementById("err").textContent = "Could not load xterm.js (offline?). " + e;
+  document.getElementById("err").textContent = "Could not load the terminal assets. " + e;
   throw e;
 }
 

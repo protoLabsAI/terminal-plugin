@@ -49,6 +49,16 @@ def test_view_served_on_the_public_path():
     assert r.status_code == 200 and "xterm" in r.text.lower()
 
 
+def test_vendored_assets_served_locally():
+    c = TestClient(_app())
+    js = c.get("/plugins/terminal/static/xterm.js")
+    assert js.status_code == 200 and "javascript" in js.headers["content-type"]
+    assert c.get("/plugins/terminal/static/xterm.css").status_code == 200
+    assert c.get("/plugins/terminal/static/addon-fit.js").status_code == 200
+    # whitelist only — an unknown name is 404 (no traversal)
+    assert c.get("/plugins/terminal/static/secret.py").status_code == 404
+
+
 # ── the bearer gate over the wire ───────────────────────────────────────────────
 
 
