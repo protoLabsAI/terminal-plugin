@@ -1,0 +1,36 @@
+id: terminal
+name: Terminal
+version: 0.1.0
+description: >-
+  A full terminal in the protoAgent console — an xterm.js view wired to a real PTY
+  shell over a WebSocket. The terminal is themed from the protoAgent design system
+  (it reads the console's --pl-* tokens and re-themes live). The WebSocket is gated
+  by the operator bearer (the same token the console uses), so only the authenticated
+  operator gets a shell. Ships DISABLED — enabling it grants the operator interactive
+  shell access on the host, so it's a deliberate trust decision.
+enabled: false
+repository: https://github.com/protoLabsAI/terminal-plugin
+min_protoagent_version: "0.27.0"   # plugin console views (ADR 0026) + WS-through-proxy (#883)
+
+config_section: terminal
+config:
+  shell: ""                 # the shell to spawn; blank → $SHELL, then /bin/bash
+  cwd: ""                   # working dir the shell starts in; blank → the server's cwd
+  scrollback: 5000          # xterm scrollback lines
+  font_size: 13             # xterm font size (px)
+  # auth_token is NOT configured here — the WS verifies the connecting token against
+  # the host's operator bearer (config auth.token / A2A_AUTH_TOKEN). When the host has
+  # no bearer set (loopback dev), the WS is open on the bound interface — only enable
+  # this plugin on a token-gated or loopback-only deployment.
+
+# Console view (ADR 0026) — a left-rail icon whose panel iframes the terminal page.
+# Served on the PUBLIC /plugins/<id> prefix (an iframe page-load can't carry a bearer);
+# the WebSocket carries the operator bearer as a ?token= query param and is verified in
+# the handler (a browser WS can't set an Authorization header).
+views:
+  - { id: terminal, label: "Terminal", icon: SquareTerminal, path: /plugins/terminal/view }
+
+# Declarative transparency (surfaced in the console; not enforced).
+capabilities:
+  network: ["cdn.jsdelivr.net"]   # xterm.js + addons are loaded from jsDelivr (v1; vendoring is a follow-up)
+  filesystem: full                # it spawns an interactive shell — full host access for the operator

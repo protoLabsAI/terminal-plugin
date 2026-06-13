@@ -1,0 +1,30 @@
+name: CI
+
+# Lint + test on the org's Namespace Linux profile (override NSC_RUNNER on a fork
+# that lacks it). The suite is host-free (only requirements-dev.txt) and spawns real
+# PTYs (Linux runners have them), so it exercises the actual shell bridge.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ vars.NSC_RUNNER || 'namespace-profile-protolabs-linux' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dev deps
+        run: pip install -r requirements-dev.txt ruff
+
+      - name: Lint
+        run: ruff check . && ruff format --check .
+
+      - name: Test
+        run: pytest -q
