@@ -42,8 +42,8 @@ A terminal is **interactive shell access on the host**. This plugin:
 
 - **protoAgent ≥ 0.27.0** (console views + WebSocket-through-the-fleet-proxy, #883).
 - A **Unix PTY** (Linux/macOS). Windows is not supported (no `pywinpty` yet).
-- No pip deps (the PTY is stdlib). xterm.js loads from jsDelivr — needs network at
-  view-load time (vendoring is a planned follow-up for airgapped installs).
+- No pip deps (the PTY is stdlib). xterm.js + addons are **vendored** (`vendor/`) and
+  served locally by the plugin — **works offline / airgapped**, no CDN.
 
 ## Install — no restart needed
 
@@ -84,8 +84,8 @@ Then open the **Terminal** rail icon. (Make sure the host has an operator bearer
 
 ## Roadmap
 
-v1 is a solid single terminal session per view. Possible next steps: multi-session
-tabs, split panes, a search overlay, vendored xterm assets (offline), Windows
-(`pywinpty`). PRs welcome.
+A solid single terminal session per view. Possible next steps: multi-session tabs,
+split panes, a search overlay, Windows (`pywinpty`). PRs welcome.
 
-Ships **disabled**; nothing runs until you enable it.
+Enabled by default once installed (the WS bearer gate is the protection) — disable
+with `plugins.disabled: [terminal]`.

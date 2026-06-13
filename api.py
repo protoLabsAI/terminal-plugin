@@ -18,6 +18,7 @@ import hmac
 import json
 import logging
 import os
+from pathlib import Path
 
 from fastapi import WebSocket  # module-level so the websocket route's annotation resolves
 
@@ -25,6 +26,15 @@ from .pty_session import PtySession
 from .view import PAGE
 
 log = logging.getLogger("protoagent.plugins.terminal")
+
+# Vendored xterm assets served locally (offline — no CDN). Whitelisted by name.
+_VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
+_VENDOR_TYPES = {
+    "xterm.js": "application/javascript",
+    "xterm.css": "text/css",
+    "addon-fit.js": "application/javascript",
+    "addon-web-links.js": "application/javascript",
+}
 
 
 def expected_token() -> str:
@@ -56,8 +66,8 @@ def scrub_keys() -> list[str]:
 
 
 def build_router(cfg: dict):
-    from fastapi import APIRouter
-    from fastapi.responses import HTMLResponse
+    from fastapi import APIRouter, HTTPException
+    from fastapi.responses import FileResponse, HTMLResponse
 
     router = APIRouter()
     shell = (cfg or {}).get("shell") or ""
@@ -66,6 +76,15 @@ def build_router(cfg: dict):
     @router.get("/view", response_class=HTMLResponse)
     async def _view():
         return HTMLResponse(PAGE)
+
+    @router.get("/static/{name}")
+    async def _static(name: str):
+        # Vendored xterm assets (offline). Whitelisted — no path traversal.
+        media = _VENDOR_TYPES.get(name)
+        path = _VENDOR_DIR / name
+        if media is None or not path.is_file():
+            raise HTTPException(404)
+        return FileResponse(path, media_type=media)
 
     @router.websocket("/ws")
     async def _ws(ws: WebSocket):
