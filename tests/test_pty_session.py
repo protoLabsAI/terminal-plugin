@@ -4,10 +4,19 @@ exercise the actual shell bridge in CI (Linux/macOS runners have PTYs)."""
 from __future__ import annotations
 
 import asyncio
+import os
 
 import pytest
 
-from terminal.pty_session import PtyError, PtySession, WinPtySession, default_shell, open_session
+from terminal.pty_session import (
+    PtyError,
+    PtySession,
+    WinPtySession,
+    default_shell,
+    home_dir,
+    open_session,
+    resolve_cwd,
+)
 
 
 async def _read_until(sess, marker: str, timeout: float = 8.0) -> bytes:
@@ -167,3 +176,74 @@ async def test_closing_right_after_spawn_never_signals_our_own_process_group():
         _signal.signal(_signal.SIGHUP, prev)
         _signal.signal(_signal.SIGTERM, prev_term)
     assert hits == []  # nothing ever reached this process
+
+
+# ── starting directory (blank → home; ~/$VARS expand; missing → home + notice) ──
+
+
+def test_blank_cwd_starts_in_home_not_the_server_cwd(monkeypatch, tmp_path):
+    # The desktop app launches its servers from "/", so the server's cwd is the wrong default.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir("/")
+    for cls in (PtySession, WinPtySession):
+        s = cls(cwd="")
+        assert (s.cwd, s.cwd_notice) == (str(tmp_path), "")
+
+
+def test_tilde_and_env_vars_expand(monkeypatch, tmp_path):
+    (tmp_path / "code").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PROJ_ROOT", str(tmp_path / "code"))
+    assert resolve_cwd("~/code") == (str(tmp_path / "code"), "")
+    assert resolve_cwd("$PROJ_ROOT") == (str(tmp_path / "code"), "")
+
+
+def test_explicit_absolute_path_is_honoured(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert resolve_cwd("/") == ("/", "")
+    assert PtySession(cwd="/").cwd == "/"
+
+
+def test_a_missing_dir_falls_back_to_home_with_a_notice(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cwd, notice = resolve_cwd("~/does-not-exist")
+    assert cwd == str(tmp_path)
+    assert "does-not-exist" in notice and str(tmp_path) in notice
+
+
+def test_unresolvable_home_falls_back_to_the_server_cwd(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "gone"))
+    monkeypatch.chdir(tmp_path)
+    assert home_dir() == str(tmp_path)
+    assert resolve_cwd("") == (str(tmp_path), "")
+
+
+def test_windows_home_and_vars_via_ntpath(monkeypatch, tmp_path):
+    """On Windows ``~`` is %USERPROFILE% (ntpath.expanduser ignores $HOME) and
+    ``%VAR%`` expands — exercised here by swapping ntpath in at the seam."""
+    import ntpath
+
+    from terminal import pty_session
+
+    monkeypatch.setattr(pty_session, "_ospath", ntpath)
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", "/nonexistent-posix-home")
+    (tmp_path / "proj").mkdir()
+    monkeypatch.setenv("PROJ", str(tmp_path / "proj"))
+    assert WinPtySession(cwd="").cwd == str(tmp_path)
+    assert resolve_cwd("%PROJ%") == (str(tmp_path / "proj"), "")
+    cwd, notice = resolve_cwd("%USERPROFILE%\\nope")
+    assert cwd == str(tmp_path) and notice
+
+
+async def test_a_real_shell_starts_in_the_resolved_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir("/")
+    s = PtySession(shell="/bin/sh", cwd="", cols=400)  # wide: a long tmp path mustn't wrap
+    s.start()
+    try:
+        s.write("pwd; echo cwd_$((40+2))_done\n")  # the echoed input can't match the marker
+        out = await _read_until(s, "cwd_42_done")
+        assert os.path.realpath(str(tmp_path)).encode() in out or str(tmp_path).encode() in out
+    finally:
+        await s.aclose()

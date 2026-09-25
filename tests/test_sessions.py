@@ -94,3 +94,15 @@ async def test_the_limit_refuses_another_shell():
     finally:
         await mgr.close_all()
     assert len(mgr) == 0
+
+
+def test_connected_carries_the_cwd_notice_on_a_fresh_attach_only():
+    pty = _FakePty([])
+    pty.cwd_notice = "Starting directory '~/nope' not found — started in /home/x"
+    sess = Session("s", pty)
+    q = asyncio.Queue()
+    sess.attach(q, resumed=False)
+    assert q.get_nowait()["notice"] == pty.cwd_notice
+    q2 = asyncio.Queue()
+    sess.attach(q2, resumed=True)
+    assert "notice" not in q2.get_nowait()
