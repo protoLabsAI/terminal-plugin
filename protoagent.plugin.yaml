@@ -1,6 +1,6 @@
 id: terminal
 name: Terminal
-version: 0.4.1
+version: 0.5.0
 description: >-
   A full terminal in the protoAgent console — an xterm.js view wired to a real PTY
   shell over a WebSocket. The terminal is themed from the protoAgent design system
@@ -11,7 +11,7 @@ description: >-
   always loopback-local. (Disable it explicitly if you don't want a terminal.)
 enabled: true
 repository: https://github.com/protoLabsAI/terminal-plugin
-min_protoagent_version: "0.27.0"   # plugin console views (ADR 0026) + WS-through-proxy (#883)
+min_protoagent_version: "0.82.0"   # views (ADR 0026) + WS-through-proxy (#883) + live_config + background mount (#1640)
 
 # Linux/macOS use the stdlib PTY (no deps). Windows is EXPERIMENTAL (untested in CI)
 # and needs pywinpty — declared, NOT auto-installed (install-deps it on Windows).
@@ -24,17 +24,37 @@ config:
   cwd: ""                   # working dir the shell starts in; blank → the server's cwd
   scrollback: 5000          # xterm scrollback lines
   font_size: 13             # xterm font size (px)
+  keep_alive_minutes: 30    # a shell with no attached view survives this long (0 = end it on disconnect)
+  max_sessions: 12          # live shells allowed at once (across every open console)
   # auth_token is NOT configured here — the WS verifies the connecting token against
   # the host's operator bearer (config auth.token / A2A_AUTH_TOKEN). When the host has
   # no bearer set (loopback dev), the WS is open on the bound interface — only enable
   # this plugin on a token-gated or loopback-only deployment.
 
+# Settings ▸ Plugins ▸ Terminal. Read live (registry.live_config): font/scrollback apply on
+# the next view load, shell/cwd to the next new shell, keep-alive/limit immediately.
+settings:
+  - { key: shell, label: "Shell", type: string, description: "The shell to spawn. Blank uses $SHELL, then /bin/bash." }
+  - { key: cwd, label: "Starting directory", type: string, description: "Where a new shell starts. Blank uses the server's working directory." }
+  - { key: font_size, label: "Font size (px)", type: number, description: "Terminal font size, 8-32. Applies when the view next loads." }
+  - { key: scrollback, label: "Scrollback (lines)", type: number, description: "Lines of history each terminal keeps. Applies when the view next loads." }
+  - { key: keep_alive_minutes, label: "Keep detached shells (minutes)", type: number, description: "How long a shell keeps running with no terminal attached (view closed, reload, network drop) before it is ended. 0 ends it on disconnect." }
+  - { key: max_sessions, label: "Max open shells", type: number, description: "Live shells allowed at once, across every open console." }
+
 # Console view (ADR 0026) — a left-rail icon whose panel iframes the terminal page.
 # Served on the PUBLIC /plugins/<id> prefix (an iframe page-load can't carry a bearer);
-# the WebSocket carries the operator bearer as a ?token= query param and is verified in
-# the handler (a browser WS can't set an Authorization header).
+# the WebSocket carries the operator bearer in its first (auth) frame and it is verified
+# in the handler (a browser WS can't set an Authorization header).
 views:
   - { id: terminal, label: "Terminal", icon: SquareTerminal, path: /plugins/terminal/view }
+
+# The vendored xterm assets the view page loads. The host auto-exempts the view PAGE path,
+# but a <script>/<link> load can't carry an Authorization header any more than the iframe
+# navigation can — so without this, on any token-gated deployment xterm 401s and the view
+# is a dead "Could not load the terminal assets" box. (Static, non-secret files only; the
+# WS does its own bearer check.)
+public_paths:
+  - "/plugins/terminal/static/"
 
 # Declarative transparency (surfaced in the console; not enforced).
 capabilities:
