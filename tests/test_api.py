@@ -273,6 +273,19 @@ def test_keep_alive_zero_ends_the_shell_on_disconnect(client, _fresh_manager):
     assert _fresh_manager.get(sid) is None
 
 
+def test_keep_alive_is_read_at_disconnect_not_at_connect(client, _fresh_manager):
+    cfg = {"shell": "/bin/cat", "keep_alive_minutes": 30}
+    c = client(lambda: cfg)
+    with c.websocket_connect("/plugins/terminal/ws") as ws:
+        sid = _auth(ws)["session"]
+        cfg["keep_alive_minutes"] = 0  # Settings changed while the tab is open
+    for _ in range(100):
+        if _fresh_manager.get(sid) is None:
+            break
+        c.portal.call(_sleep, 0.02)
+    assert _fresh_manager.get(sid) is None  # the NEW value (0 = end on disconnect) applied
+
+
 async def _sleep(t):
     import asyncio
 

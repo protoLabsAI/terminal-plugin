@@ -181,7 +181,6 @@ async def _bridge(ws, hello: dict, conf) -> None:
     from fastapi import WebSocketDisconnect
 
     cfg = conf()
-    keep_alive = cfg["keep_alive_minutes"] * 60
     # The reaper re-reads the config each tick, so a Settings change applies live.
     MANAGER.ensure_reaper(lambda: conf()["keep_alive_minutes"] * 60)
 
@@ -236,7 +235,9 @@ async def _bridge(ws, hello: dict, conf) -> None:
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
         still_ours = sess.detach(queue)
-        if killed or (still_ours and not keep_alive):
+        # Re-read keep-alive NOW, not at connect: a Settings change made while this tab
+        # was open must govern what its disconnect does.
+        if killed or (still_ours and not conf()["keep_alive_minutes"]):
             await MANAGER.close(sess.id)
         await _safe_close(ws)
 
