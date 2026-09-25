@@ -83,7 +83,23 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 // the slug-aware token. ESM module → dynamic import. Fallback to a tokenless shim.
 let kit;
 try { kit = await import(BASE + "/_ds/plugin-kit.js"); }
-catch (e) { kit = { initPluginView(cb){ cb && cb(); }, getToken(){ return ""; } }; }
+catch (e) { kit = { initPluginView(cb){ cb && cb(); }, getToken(){ return ""; }, apiFetch(p, i){ return fetch(BASE + p, i); } }; }
+
+// A fresh single-use WS ticket from the GATED ticket route. kit.apiFetch awaits the
+// console's bearer handshake and resolves the slug-aware base, so this is authenticated
+// by the host — and, through the fleet hub, re-authenticated with the fleet token the
+// member expects (the in-band operator token alone never matches a member's bearer).
+// null ⇒ couldn't mint (older plugin, network): the auth frame falls back to the token.
+// "denied" ⇒ the host refused us (401/403).
+async function fetchTicket(){
+  try {
+    const r = await kit.apiFetch("/api/plugins/terminal/ticket", { method: "POST" });
+    if (r.status === 401 || r.status === 403) return "denied";
+    if (!r.ok) return null;
+    const j = await r.json();
+    return (j && typeof j.ticket === "string" && j.ticket) || null;
+  } catch (e) { return null; }
+}
 
 // Load the VENDORED xterm UMD bundles (served by this plugin — offline), then read
 // their globals: xterm spreads its exports onto window (→ window.Terminal); the addons
@@ -217,14 +233,22 @@ function switchTo(id){
   if (s){ fit(s); s.term.focus(); $("shell").textContent = s.meta || ""; setStatus(s.status || "…", s.statusCls); }
 }
 
-function connect(s){
+async function connect(s){
   clearTimeout(s.retryTimer);
-  const ws = new WebSocket(wsUrl());
-  s.ws = ws; s.detached = false; s.fatal = "";
+  const gen = (s.gen = (s.gen || 0) + 1);   // a newer connect() supersedes this one
+  s.detached = false; s.fatal = "";
   setS(s, s.retry ? "reconnecting…" : "connecting…", "");
+  // EVERY connect (first open, reconnect, reattach) mints its own ticket — they're single-use.
+  const ticket = await fetchTicket();
+  if (gen !== s.gen || s.closing) return;
+  if (ticket === "denied") return setS(s, "unauthorized", "bad");
+  const ws = new WebSocket(wsUrl());
+  s.ws = ws;
   ws.onopen = () => {
-    const tok = (kit.getToken && kit.getToken()) || "";
-    ws.send(JSON.stringify({ type: "auth", token: tok, session: s.sessionId || null, cols: s.term.cols, rows: s.term.rows }));
+    const hello = { type: "auth", session: s.sessionId || null, cols: s.term.cols, rows: s.term.rows };
+    if (ticket) hello.ticket = ticket;
+    else hello.token = (kit.getToken && kit.getToken()) || "";   // direct-connection fallback
+    ws.send(JSON.stringify(hello));
   };
   ws.onmessage = (e) => {
     let m; try { m = JSON.parse(e.data); } catch (_) { return; }

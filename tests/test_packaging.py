@@ -50,7 +50,13 @@ def test_view_page_pulls_in_the_protoagent_theme_and_four_rules():
     assert "CanvasAddon" in PAGE and "customGlyphs" in PAGE
     # the bearer rides the socket's first frame — never the URL (logs, history, proxies)
     assert "/plugins/terminal/ws" in PAGE and "ws?token=" not in PAGE
-    assert 'type: "auth", token: tok' in PAGE
+    assert 'type: "auth"' in PAGE
+    # ...carrying a single-use ticket minted by the GATED HTTP route (works through the
+    # fleet hub, which swaps the operator bearer for the member's fleet token) — fresh
+    # per connect, with the in-band token only as the direct-connection fallback.
+    assert "/api/plugins/terminal/ticket" in PAGE and "kit.apiFetch" in PAGE
+    assert "hello.ticket = ticket" in PAGE and "hello.token =" in PAGE
+    assert "const ticket = await fetchTicket()" in PAGE
     # THE theme requirement: xterm's theme is built from protoAgent's --pl-* tokens,
     # and re-applied live on a re-theme (MutationObserver on :root).
     assert "--pl-color-bg" in PAGE and "--pl-color-fg" in PAGE and "--pl-color-accent" in PAGE
@@ -109,4 +115,6 @@ def test_register_mounts_the_public_router(registry):
 
     terminal.register(registry)
     assert "/plugins/terminal" in registry.routers  # the public view + WS router
+    # the WS-ticket mint rides the host's bearer-gated /api/plugins/* prefix
+    assert "/api/plugins/terminal" in registry.routers
     assert "terminal-sessions" in registry.surfaces  # shells are ended on shutdown

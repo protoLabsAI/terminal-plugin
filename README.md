@@ -43,13 +43,18 @@ A terminal is **interactive shell access on the host**. This plugin:
   is bearer-gated (below) and protoAgent only binds a non-loopback interface when a
   token is set, so an un-gated shell is always loopback-local. Disable it explicitly
   (`plugins.disabled: [terminal]`) if you don't want a terminal.
-- **Gates the WebSocket on the operator bearer.** The page gets the bearer from the
-  DS-kit handshake and sends it as the socket's **first frame** (`{type:"auth", token}`);
-  the server verifies it against the host's configured token (`auth.token` /
-  `A2A_AUTH_TOKEN`) — the same token the console uses — so only the authenticated
-  operator gets a shell. A socket that doesn't authenticate within 10s is closed. (A
-  browser WebSocket can't send an Authorization header; the token is deliberately kept
-  out of the URL, where it would land in access logs and history.)
+- **Gates the WebSocket on the operator bearer, via a single-use ticket.** Before each
+  connect the page calls `POST /api/plugins/terminal/ticket` — an ordinary HTTP route on
+  the host's bearer-gated `/api/plugins/*` prefix — and sends the ticket it gets back as
+  the socket's **first frame** (`{type:"auth", ticket}`). Tickets are random, live ~30s,
+  and are burned on first use. This is what makes the terminal work on a **fleet
+  member** reached through the hub: the hub authenticates the ticket request and
+  forwards it with the fleet service token the member expects, whereas the operator's
+  own bearer never matches a member's. A direct connection may still send
+  `{type:"auth", token}`, verified against the host's configured token (`auth.token` /
+  `A2A_AUTH_TOKEN`). A socket that doesn't authenticate within 10s is closed. (A
+  browser WebSocket can't send an Authorization header; credentials are deliberately
+  kept out of the URL, where they would land in access logs and history.)
 - **Exempts only the static xterm assets** (`public_paths: /plugins/terminal/static/`)
   so they load on a token-gated deployment; they're vendored, non-secret files.
 - **Caps live shells** (`max_sessions`, default 12) and ends detached shells after
@@ -79,7 +84,7 @@ runtime-status without a console rebuild (#853). No restart.
 Or from the CLI against a running server:
 
 ```bash
-python -m server plugin install https://github.com/protoLabsAI/terminal-plugin --ref v0.5.0
+python -m server plugin install https://github.com/protoLabsAI/terminal-plugin --ref v0.5.1
 # then pick it up live: hit "Sync" in the console Plugins panel, or have the agent call
 # reload_plugins (plugin-devkit). It hot-mounts — no restart.
 ```
