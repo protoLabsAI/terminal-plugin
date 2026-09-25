@@ -113,8 +113,9 @@ class PtySession:
         try:
             return os.read(self._fd, n)
         except OSError as exc:
-            # On Linux the PTY master read raises EIO (not EOF) once the child exits.
-            if exc.errno == errno.EIO:
+            # On Linux the PTY master read raises EIO (not EOF) once the child exits; EAGAIN/
+            # EBADF mean aclose() has taken the fd over (drain → close) — the session is over.
+            if exc.errno in (errno.EIO, errno.EAGAIN, errno.EBADF):
                 return b""
             raise
 
@@ -156,47 +157,74 @@ class PtySession:
         return self._exit_code
 
     async def aclose(self) -> int | None:
-        """Terminate the shell's process group (SIGTERM, then SIGKILL after a grace),
-        close the master fd, and reap. Returns the exit code. Idempotent."""
-        pid = self.pid
-        if pid is not None:
+        """End the shell like closing a terminal window: SIGHUP + SIGTERM to its process
+        group, SIGKILL after a grace, then close the master fd. Returns the exit code.
+        Idempotent, and NEVER blocks indefinitely.
+
+        While waiting it keeps DRAINING the master. On macOS a process that exits with
+        unread tty output blocks inside exit() until the master side reads it — so with
+        the reader already gone, a blocking ``waitpid`` deadlocks forever (a busy shell,
+        a build spewing output, a login shell mid-profile). Draining lets it finish."""
+        if self.pid is not None:
+            # Interactive shells ignore SIGTERM; SIGHUP is what a closing terminal sends,
+            # and it reaches the jobs in the group too.
+            self._signal_group(signal.SIGHUP)
             self._signal_group(signal.SIGTERM)
-            for _ in range(20):  # ~1s grace
-                if self.poll() is not None:
-                    break
-                await asyncio.sleep(0.05)
-            if self.poll() is None:
+            if not await self._wait_exit(1.0):
                 self._signal_group(signal.SIGKILL)
-                try:
-                    await asyncio.get_running_loop().run_in_executor(None, self._reap, pid)
-                except Exception:  # noqa: BLE001
-                    pass
+                await self._wait_exit(2.0)
         if self._fd is not None:
             try:
                 os.close(self._fd)
             except OSError:
                 pass
             self._fd = None
+        if self.pid is not None:
+            await self._wait_exit(0.5)  # one more chance to reap now the master is gone
         return self._exit_code
 
-    def _signal_group(self, sig: int) -> None:
-        if self.pid is None:
+    async def _wait_exit(self, timeout: float) -> bool:
+        """Drain + poll until the child is reaped or ``timeout`` passes."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            self._drain()
+            if self.poll() is not None or self.pid is None:
+                return True
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(0.02)
+
+    def _drain(self) -> None:
+        """Read and discard whatever output is pending on the master, without blocking."""
+        if self._fd is None:
             return
         try:
-            os.killpg(os.getpgid(self.pid), sig)
-        except OSError:
-            try:
-                os.kill(self.pid, sig)
-            except OSError:
-                pass
+            os.set_blocking(self._fd, False)
+            for _ in range(64):
+                if not os.read(self._fd, 65536):
+                    return
+        except OSError:  # EAGAIN (drained), EIO (slave gone), EBADF — all mean "done"
+            return
 
-    def _reap(self, pid: int) -> None:
+    def _signal_group(self, sig: int) -> None:
+        """Signal the shell's process group — but ONLY when the child really leads its
+        own group. Right after fork there is a window before the child's setsid() where
+        it is still in OUR group; ``killpg(getpgid(child))`` then would signal the
+        server's own process group (the server, and whatever launched it). In that
+        window, signal just the child."""
+        pid = self.pid
+        if pid is None:
+            return
         try:
-            _, status = os.waitpid(pid, 0)
-            self._exit_code = os.waitstatus_to_exitcode(status)
-            self.pid = None
+            if os.getpgid(pid) == pid and pid != os.getpgrp():
+                os.killpg(pid, sig)
+                return
         except OSError:
-            self.pid = None
+            pass
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
 
 
 class WinPtySession:
