@@ -108,6 +108,7 @@ class _SizePty(_FakePty):
 async def test_a_resumed_viewer_nudges_the_size_so_tuis_repaint():
     pty = _SizePty()
     sess = Session("s", pty)
+    sess._emit("\x1b[?1049h")  # vim / htop / a TUI agent is up (alternate screen)
     sess.attach(asyncio.Queue(), resumed=True)
     sess.resize(100, 30)
     await asyncio.sleep(0.15)
@@ -115,6 +116,16 @@ async def test_a_resumed_viewer_nudges_the_size_so_tuis_repaint():
     assert pty.sizes == [(100, 29), (100, 30)]
     sess.resize(100, 30)  # only the first resize after a resume nudges
     assert pty.sizes[-1] == (100, 30) and len(pty.sizes) == 3
+
+
+async def test_a_resume_at_a_plain_prompt_does_not_nudge():
+    pty = _SizePty()
+    sess = Session("s", pty)
+    sess._emit("user@host ~ % ")
+    sess.attach(asyncio.Queue(), resumed=True)
+    sess.resize(100, 30)
+    await asyncio.sleep(0.1)
+    assert pty.sizes == [(100, 30)]  # no extra SIGWINCH → no reprinted prompt
 
 
 async def test_a_fresh_viewer_does_not_nudge():

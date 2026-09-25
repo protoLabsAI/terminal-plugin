@@ -29,6 +29,7 @@ import time
 from collections import deque
 
 from .pty_session import open_session
+from .textutil import alt_screen_after
 
 log = logging.getLogger("protoagent.plugins.terminal")
 
@@ -57,6 +58,7 @@ class Session:
         self._viewer: asyncio.Queue | None = None
         self._pump: asyncio.Task | None = None
         self._redraw_pending = False
+        self.alt_screen = False  # a full-screen program (vim, less, htop) is up
 
     @property
     def shell(self) -> str:
@@ -103,6 +105,8 @@ class Session:
     def _emit(self, text: str) -> None:
         if not text:
             return
+        if "\x1b[?" in text:
+            self.alt_screen = alt_screen_after(text, self.alt_screen)
         self._buffer.append(text)
         self._buffered += len(text)
         while self._buffered > self._buffer_chars and len(self._buffer) > 1:
@@ -137,8 +141,10 @@ class Session:
         self.detached_at = None
         # A reattaching viewer replays raw output, which can't faithfully rebuild a
         # full-screen app's screen (the alt-screen switch may be long gone from the
-        # buffer). Ask the program to repaint on the viewer's first resize.
-        self._redraw_pending = resumed
+        # buffer). Ask the program to repaint on the viewer's first resize — only when a
+        # full-screen program is up: at a plain prompt the replay is already right, and
+        # an extra SIGWINCH just makes zsh reprint its prompt (a stray "%" per reload).
+        self._redraw_pending = resumed and self.alt_screen
         queue.put_nowait(
             {"type": "connected", "session": self.id, "shell": self.shell, "cwd": self.cwd, "resumed": resumed}
         )
