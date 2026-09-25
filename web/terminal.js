@@ -274,15 +274,38 @@ export function boot({ kit, BASE, CFG, xt }) {
   }
 
   // ── connection ────────────────────────────────────────────────────────────────
-  function connect(p) {
+  // A fresh single-use WS ticket from the GATED ticket route. kit.apiFetch awaits the
+  // console's bearer handshake and resolves the slug-aware base, so this is authenticated
+  // by the host — and, through the fleet hub, re-authenticated with the fleet token the
+  // member expects (the in-band operator token alone never matches a member's bearer).
+  // null ⇒ couldn't mint (older plugin, network): the auth frame falls back to the token.
+  // "denied" ⇒ the host refused us (401/403).
+  async function fetchTicket() {
+    try {
+      const r = await kit.apiFetch("/api/plugins/terminal/ticket", { method: "POST" });
+      if (r.status === 401 || r.status === 403) return "denied";
+      if (!r.ok) return null;
+      const j = await r.json();
+      return (j && typeof j.ticket === "string" && j.ticket) || null;
+    } catch (e) { return null; }
+  }
+
+  async function connect(p) {
     clearTimeout(p.retryTimer);
-    const ws = new WebSocket(wsUrl());
-    p.ws = ws; p.detached = false; p.fatal = ""; p.sentCols = 0; p.sentRows = 0;
+    const gen = (p.gen = (p.gen || 0) + 1);   // a newer connect() supersedes this one
+    p.detached = false; p.fatal = ""; p.sentCols = 0; p.sentRows = 0;
     setS(p, p.retry ? "reconnecting…" : "connecting…", "");
+    // EVERY connect (first open, reconnect, reattach) mints its own ticket — they're single-use.
+    const ticket = await fetchTicket();
+    if (gen !== p.gen || p.closing) return;
+    if (ticket === "denied") return setS(p, "unauthorized", "bad");
+    const ws = new WebSocket(wsUrl());
+    p.ws = ws;
     ws.onopen = () => {
-      const tok = (kit.getToken && kit.getToken()) || "";
-      ws.send(JSON.stringify({ type: "auth", token: tok, session: p.sessionId || null, cols: p.term.cols, rows: p.term.rows,
-                               cwd_from: p.cwdFrom || null }));
+      const hello = { type: "auth", session: p.sessionId || null, cols: p.term.cols, rows: p.term.rows, cwd_from: p.cwdFrom || null };
+      if (ticket) hello.ticket = ticket;
+      else hello.token = (kit.getToken && kit.getToken()) || "";   // direct-connection fallback
+      ws.send(JSON.stringify(hello));
       p.cwdFrom = null;   // only a brand-new shell starts "where the other pane is"
     };
     ws.onmessage = (e) => {

@@ -129,7 +129,7 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 // slug-aware token. ESM module → dynamic import. Fallback to a tokenless shim (standalone).
 let kit;
 try { kit = await import(BASE + "/_ds/plugin-kit.js"); }
-catch (e) { kit = { initPluginView(cb){ cb && cb(); }, getToken(){ return ""; } }; }
+catch (e) { kit = { initPluginView(cb){ cb && cb(); }, getToken(){ return ""; }, apiFetch(p, i){ return fetch(BASE + p, i); } }; }
 
 // Load the VENDORED xterm UMD bundles (served by this plugin — offline), then read their
 // globals: xterm spreads its exports onto window (→ window.Terminal); each addon exposes

@@ -57,7 +57,15 @@ def test_view_page_pulls_in_the_protoagent_theme_and_four_rules():
     assert "WebglAddon" in app and "onContextLoss" in app and "CanvasAddon" in app and "customGlyphs" in app
     # the bearer rides the socket's first frame — never the URL (logs, history, proxies)
     assert "/plugins/terminal/ws" in app and "ws?token=" not in app
-    assert 'type: "auth", token: tok' in app
+    assert 'type: "auth"' in app
+    # ...carrying a single-use ticket minted by the GATED HTTP route (works through the
+    # fleet hub, which swaps the operator bearer for the member's fleet token) — fresh
+    # per connect, with the in-band token only as the direct-connection fallback.
+    assert "/api/plugins/terminal/ticket" in app and "kit.apiFetch" in app
+    assert "hello.ticket = ticket" in app and "hello.token =" in app
+    assert "const ticket = await fetchTicket()" in app
+    # the standalone shim can still mint (apiFetch falls back to a same-origin fetch)
+    assert "apiFetch(p, i){ return fetch(BASE + p, i); }" in PAGE
     # THE theme requirement: every colour from protoAgent's --pl-* tokens, re-applied live
     for tok in ("--pl-color-bg", "--pl-color-fg", "--pl-color-accent", "--pl-color-status-info"):
         assert tok in app
@@ -98,7 +106,10 @@ def test_renaming_a_tab_cannot_change_the_layout():
     then flickered a scrollbar in a refit loop."""
     from terminal.view import PAGE
 
-    assert "html,body{margin:0;height:100%;" in PAGE and "overflow:hidden}" in PAGE.split("html,body{", 1)[1].split("}", 1)[0] + "}"
+    assert (
+        "html,body{margin:0;height:100%;" in PAGE
+        and "overflow:hidden}" in PAGE.split("html,body{", 1)[1].split("}", 1)[0] + "}"
+    )
     assert "overflow-x:auto;overflow-y:hidden" in PAGE  # the tab strip never scrolls vertically
     assert ".tab{display:flex;align-items:center;gap:6px;height:22px;" in PAGE  # fixed tab height
     assert "height:16px;box-sizing:border-box" in PAGE  # the rename input fits inside it
@@ -163,4 +174,6 @@ def test_register_mounts_the_public_router(registry):
 
     terminal.register(registry)
     assert "/plugins/terminal" in registry.routers  # the public view + WS router
+    # the WS-ticket mint rides the host's bearer-gated /api/plugins/* prefix
+    assert "/api/plugins/terminal" in registry.routers
     assert "terminal-sessions" in registry.surfaces  # shells are ended on shutdown

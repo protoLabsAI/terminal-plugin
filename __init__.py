@@ -1,13 +1,14 @@
 """terminal — a full terminal (xterm.js + a real PTY over WebSocket) in the console.
 
-``register()`` mounts ONE router under the PUBLIC ``/plugins/terminal`` prefix: the
+``register()`` mounts a router under the PUBLIC ``/plugins/terminal`` prefix: the
 view page (an iframe page-load can't carry a bearer, so the page must be public) and
-the WebSocket, which verifies the operator bearer itself from the socket's first
-``auth`` frame (a browser WS can't set an Authorization header, and a ``?token=`` would
-leak into access logs). Plus a gated
-``/api/plugins/terminal`` router (the session list a view adopts agent-opened tabs
-from), four agent tools (tools.py — list / read / run / open, gated by ``agent_access``),
-and a stop-only surface that kills the (now socket-independent) shells on
+the WebSocket, which verifies its first ``auth`` frame itself (a browser WS can't set an
+Authorization header, and a ``?token=`` would leak into access logs). Plus a GATED
+``/api/plugins/terminal`` router: the single-use WS ticket that frame carries (works
+through the fleet hub, where the operator bearer is swapped) and the session list a
+view adopts agent-opened tabs from; four agent tools (tools.py — list / read / run /
+open, gated by ``agent_access``); and a stop-only surface that kills the (now
+socket-independent) shells on
 server shutdown. Enabled by default — the WS bearer gate is the protection, and an un-gated
 shell is only ever loopback-local (protoAgent requires a token to bind non-loopback).
 """
@@ -25,17 +26,15 @@ def register(registry) -> None:
     # the next view load / new shell with no restart; older hosts get the snapshot.
     live = getattr(registry, "live_config", None) or (lambda: registry.config or {})
     try:
-        from .api import build_router
+        from .api import build_api_router, build_router
 
         registry.register_router(build_router(live), prefix="/plugins/terminal")
+        # The GATED /api/plugins/* prefix — the host's bearer middleware (and, through the
+        # fleet hub, its fleet-token swap) authenticates it: the WS-ticket mint + the
+        # session list a view adopts agent-opened tabs from.
+        registry.register_router(build_api_router(), prefix="/api/plugins/terminal")
     except Exception:  # noqa: BLE001 — the router is best-effort
         log.exception("[terminal] mounting the terminal router failed")
-    try:
-        from .api import build_api_router
-
-        registry.register_router(build_api_router(), prefix="/api/plugins/terminal")
-    except Exception:  # noqa: BLE001
-        log.exception("[terminal] mounting the terminal API router failed")
     # Agent tools (tools.py) — gated live by the agent_access setting.
     try:
         from .api import resolve
