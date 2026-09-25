@@ -24,6 +24,9 @@ Install into any protoAgent agent from this git URL — it's not tied to one age
 - **Settings** — shell, starting directory, font size, scrollback, keep-alive and the
   shell limit are editable in **Settings ▸ Plugins ▸ Terminal**, and apply without a
   restart (font/scrollback on the next view load, shell/cwd to the next new shell).
+  A new shell starts in your **home folder** unless you set a starting directory
+  (`~/code` and `$VARS` expand; a folder that does not exist falls back to home, with
+  a one-line notice in the terminal).
 - A **real PTY** on the backend — stdlib `pty` (no pip deps), so it's a genuine
   interactive shell: TUIs, colour, resize, `Ctrl-C`, the works. The wire protocol
   mirrors protoMaker's terminal (`data`/`exit`/`connected` ⇄ `input`/`resize`/`ping`).
@@ -84,7 +87,7 @@ runtime-status without a console rebuild (#853). No restart.
 Or from the CLI against a running server:
 
 ```bash
-python -m server plugin install https://github.com/protoLabsAI/terminal-plugin --ref v0.5.1
+python -m server plugin install https://github.com/protoLabsAI/terminal-plugin --ref v0.5.2
 # then pick it up live: hit "Sync" in the console Plugins panel, or have the agent call
 # reload_plugins (plugin-devkit). It hot-mounts — no restart.
 ```
@@ -95,7 +98,7 @@ Optional config in `config/langgraph-config.yaml` (all have sane defaults):
 # enabled by default; to turn it OFF: plugins: { disabled: [terminal] }
 terminal:
   shell: ""                 # blank → $SHELL, then /bin/bash
-  cwd: ""                   # blank → the server's cwd
+  cwd: ""                   # blank → your home folder; ~ and $VARS expand
   scrollback: 5000
   font_size: 13
   keep_alive_minutes: 30    # detached shells live this long; 0 = end on disconnect

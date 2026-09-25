@@ -1,6 +1,6 @@
 id: terminal
 name: Terminal
-version: 0.5.1
+version: 0.5.2
 description: >-
   A full terminal in the protoAgent console — an xterm.js view wired to a real PTY
   shell over a WebSocket. The terminal is themed from the protoAgent design system
@@ -21,7 +21,7 @@ requires_pip:
 config_section: terminal
 config:
   shell: ""                 # the shell to spawn; blank → $SHELL, then /bin/bash
-  cwd: ""                   # working dir the shell starts in; blank → the server's cwd
+  cwd: ""                   # working dir the shell starts in; blank → your home folder (~ and $VARS expand)
   scrollback: 5000          # xterm scrollback lines
   font_size: 13             # xterm font size (px)
   keep_alive_minutes: 30    # a shell with no attached view survives this long (0 = end it on disconnect)
@@ -35,7 +35,7 @@ config:
 # the next view load, shell/cwd to the next new shell, keep-alive/limit immediately.
 settings:
   - { key: shell, label: "Shell", type: string, description: "The shell to spawn. Blank uses $SHELL, then /bin/bash." }
-  - { key: cwd, label: "Starting directory", type: string, description: "Where a new shell starts. Blank uses the server's working directory." }
+  - { key: cwd, label: "Starting directory", type: string, description: "Where a new shell starts. Blank starts in your home folder. ~ and $VARS expand; a missing folder falls back to home." }
   - { key: font_size, label: "Font size (px)", type: number, description: "Terminal font size, 8-32. Applies when the view next loads." }
   - { key: scrollback, label: "Scrollback (lines)", type: number, description: "Lines of history each terminal keeps. Applies when the view next loads." }
   - { key: keep_alive_minutes, label: "Keep detached shells (minutes)", type: number, description: "How long a shell keeps running with no terminal attached (view closed, reload, network drop) before it is ended. 0 ends it on disconnect." }

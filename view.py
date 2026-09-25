@@ -258,6 +258,7 @@ async function connect(s){
       if (m.resumed || lost) s.term.reset();   // a resume's replay repaints from scratch
       if (lost) s.term.write(dim("[the previous shell ended — this is a new one]"));
       s.sessionId = m.session; s.retry = 0; s.exited = false; save();
+      if (m.notice) s.term.write(dim("[" + m.notice + "]"));
       s.meta = (m.shell || "") + "  " + (m.cwd || "");
       if (s.id === activeId) $("shell").textContent = s.meta;
       setS(s, m.resumed ? "reattached" : "connected", "ok");

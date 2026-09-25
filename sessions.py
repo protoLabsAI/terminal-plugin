@@ -127,9 +127,11 @@ class Session:
             self._viewer.put_nowait({"type": "detached", "reason": "attached elsewhere"})
         self._viewer = queue
         self.detached_at = None
-        queue.put_nowait(
-            {"type": "connected", "session": self.id, "shell": self.shell, "cwd": self.cwd, "resumed": resumed}
-        )
+        connected = {"type": "connected", "session": self.id, "shell": self.shell, "cwd": self.cwd, "resumed": resumed}
+        notice = getattr(self.pty, "cwd_notice", "")
+        if notice and not resumed:  # e.g. the configured starting directory is missing
+            connected["notice"] = notice
+        queue.put_nowait(connected)
         backlog = self.replay()
         if backlog:
             queue.put_nowait({"type": "data", "data": backlog})
