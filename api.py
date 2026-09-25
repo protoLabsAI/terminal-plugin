@@ -215,7 +215,9 @@ async def _bridge(ws, hello: dict, conf) -> None:
             msg = json.loads(await ws.receive_text())
             kind = msg.get("type")
             if kind == "input":
-                sess.write(msg.get("data", ""))
+                data = msg.get("data")
+                if isinstance(data, str):  # anything else is a malformed frame — ignore it
+                    sess.write(data)
             elif kind == "resize":
                 sess.resize(_num(msg.get("cols"), 80, 1, 1000), _num(msg.get("rows"), 24, 1, 1000))
             elif kind == "ping":
@@ -229,6 +231,10 @@ async def _bridge(ws, hello: dict, conf) -> None:
         log.warning("[terminal] WS bridge error", exc_info=True)
     finally:
         writer.cancel()
+        try:
+            await writer  # let it finish unwinding before the shell (and its fd) go away
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
         still_ours = sess.detach(queue)
         if killed or (still_ours and not keep_alive):
             await MANAGER.close(sess.id)

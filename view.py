@@ -2,8 +2,8 @@
 ``/plugins/terminal/view`` (by the api.py router).
 
 Four rules (ADR 0026/0042): served on the PUBLIC path · the WebSocket is the gated
-channel (it carries the operator bearer as a ?token= param) · slug-aware base (works
-on the host window AND through the fleet proxy) · links the DS plugin-kit.
+channel (the operator bearer rides its FIRST frame, never the URL) · slug-aware base
+(works on the host window AND through the fleet proxy) · links the DS plugin-kit.
 
 TABS: several independent sessions in one view. Each tab owns its own xterm + fit
 addon + WebSocket, attached to its own server-side shell by id. Shells OUTLIVE the

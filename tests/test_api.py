@@ -133,6 +133,24 @@ def test_vendored_assets_served_locally():
     assert c.get("/plugins/terminal/static/secret.py").status_code == 404
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "..%2Fapi.py",
+        "..%2F..%2F..%2Fetc%2Fpasswd",
+        "%2E%2E%2Fapi.py",
+        "....%2F%2F....%2F%2Fetc%2Fpasswd",
+        "..%5Capi.py",
+        "xterm.js%00.py",
+        "..",
+    ],
+)
+def test_static_route_refuses_traversal(path):
+    r = TestClient(_app()).get("/plugins/terminal/static/" + path)
+    assert r.status_code == 404
+    assert "import" not in r.text and "root:" not in r.text
+
+
 # ── the bearer gate over the wire (first frame, never the URL) ──────────────────
 
 
@@ -141,6 +159,17 @@ def test_ws_rejects_a_missing_token_when_one_is_required(monkeypatch, client):
     c = client()
     with c.websocket_connect("/plugins/terminal/ws") as ws:
         ws.send_json({"type": "auth", "token": ""})
+        assert ws.receive_json() == {"type": "error", "message": "unauthorized"}
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 4001
+
+
+def test_ws_rejects_a_wrong_token(monkeypatch, client):
+    monkeypatch.setenv("A2A_AUTH_TOKEN", "s3cret")
+    c = client()
+    with c.websocket_connect("/plugins/terminal/ws") as ws:
+        ws.send_json({"type": "auth", "token": "s3cret-but-stale"})
         assert ws.receive_json() == {"type": "error", "message": "unauthorized"}
         with pytest.raises(WebSocketDisconnect) as exc:
             ws.receive_json()
@@ -259,8 +288,52 @@ def test_a_second_viewer_takes_over(client, _fresh_manager):
             assert first.receive_json() == {"type": "detached", "reason": "attached elsewhere"}
             second.send_json({"type": "input", "data": "still_alive\n"})
             _read_until(second, "still_alive")
-        # the kicked viewer's disconnect must NOT end the shell it no longer owns —
-        # only the second (the owner) disconnecting does, with keep_alive=0.
+            # the takeover itself never ends the shell
+            assert _fresh_manager.get(sid) is not None
+    # once the owner has disconnected, keep_alive=0 ends it. (That the KICKED viewer's
+    # disconnect leaves an owned shell alone is test_the_kicked_viewers_disconnect_….)
+    for _ in range(100):
+        if _fresh_manager.get(sid) is None:
+            break
+        c.portal.call(_sleep, 0.02)
+    assert _fresh_manager.get(sid) is None
+
+
+def test_the_kicked_viewers_disconnect_leaves_the_shell_running(client, _fresh_manager):
+    c = client({"shell": "/bin/cat", "keep_alive_minutes": 0})
+    with c.websocket_connect("/plugins/terminal/ws") as second:
+        with c.websocket_connect("/plugins/terminal/ws") as first:
+            sid = _auth(first)["session"]
+            _auth(second, session=sid)
+            assert first.receive_json()["type"] == "detached"
+        # `first` is now fully disconnected; the shell still belongs to `second`
+        c.portal.call(_sleep, 0.2)
+        assert _fresh_manager.get(sid) is not None
+        second.send_json({"type": "input", "data": "owner_still_here\n"})
+        _read_until(second, "owner_still_here")
+
+
+def test_concurrent_sessions_are_isolated(client):
+    c = client({"shell": "/bin/cat"})
+    with c.websocket_connect("/plugins/terminal/ws") as a, c.websocket_connect("/plugins/terminal/ws") as b:
+        sa, sb = _auth(a)["session"], _auth(b)["session"]
+        assert sa != sb
+        a.send_json({"type": "input", "data": "only_for_a\n"})
+        b.send_json({"type": "input", "data": "only_for_b\n"})
+        got_a = _read_until(a, "only_for_a")
+        got_b = _read_until(b, "only_for_b")
+        assert "only_for_b" not in got_a and "only_for_a" not in got_b
+
+
+def test_a_non_string_input_frame_is_ignored(client, _fresh_manager):
+    c = client({"shell": "/bin/cat"})
+    with c.websocket_connect("/plugins/terminal/ws") as ws:
+        sid = _auth(ws)["session"]
+        for junk in (42, ["x"], {"a": 1}, None):
+            ws.send_json({"type": "input", "data": junk})
+        ws.send_json({"type": "input", "data": "survived_junk\n"})
+        _read_until(ws, "survived_junk")
+        assert _fresh_manager.get(sid) is not None
 
 
 def test_the_session_limit_is_enforced(client):

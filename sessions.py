@@ -45,7 +45,6 @@ class Session:
     def __init__(self, sid: str, pty, *, buffer_chars: int = DEFAULT_BUFFER_CHARS):
         self.id = sid
         self.pty = pty
-        self.created = time.monotonic()
         self.detached_at: float | None = time.monotonic()  # no viewer yet
         self.exit_code: int | None = None
         self.exited = False
