@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 
 # Linux/macOS: no runtime pip deps — the PTY backend is stdlib (pty/os/fcntl/termios),
 # the host provides fastapi + langchain-core, and xterm.js is VENDORED + served locally
-# (offline). Windows is EXPERIMENTAL and needs pywinpty (manifest requires_pip).
+# (offline). Windows needs pywinpty (manifest requires_pip; validated in the CI windows job).
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

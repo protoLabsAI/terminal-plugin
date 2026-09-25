@@ -117,9 +117,12 @@ A terminal is **interactive shell access on the host**. This plugin:
 
 - **protoAgent ≥ 0.82.0** (console views, WebSocket-through-the-fleet-proxy #883, live
   config, and background-mounted views #1640).
-- **Linux/macOS** — stdlib PTY, no pip deps. **Windows is EXPERIMENTAL** (untested in
-  CI): it uses `pywinpty` — `python -m server plugin install-deps terminal` on Windows,
-  then validate. The POSIX path is the supported, tested one.
+- **Linux/macOS** — stdlib PTY, no pip deps.
+- **Windows** — via `pywinpty` (`python -m server plugin install-deps terminal`),
+  validated in CI on a real `cmd.exe` through the whole WebSocket bridge. POSIX-only
+  features that don't apply on Windows: login shells, the agent's "a program holds the
+  foreground" guard (so `terminal_run` there waits on output going quiet), and the
+  cwd/program shown by `terminal_list`.
 - xterm.js + addons are **vendored** (`vendor/`) and served locally by the plugin —
   **works offline / airgapped**, no CDN.
 
@@ -165,7 +168,7 @@ Then open the **Terminal** rail icon. (Make sure the host has an operator bearer
 
 | File | What |
 |---|---|
-| `pty_session.py` | the PTY shell session: POSIX (stdlib `pty`) + Windows (`pywinpty`, experimental) behind `open_session()` |
+| `pty_session.py` | the PTY shell session: POSIX (stdlib `pty`) + Windows (`pywinpty`) behind `open_session()` |
 | `sessions.py` | the session manager: shells that outlive their socket — replay buffer, attach/takeover, keep-alive reaper |
 | `api.py` | the routers: the public `/view` page (config baked in), `/static/*` assets and the bearer-gated `/ws` attach bridge; the gated `/api/plugins/terminal/sessions` list |
 | `tools.py` | the agent tools (`terminal_list/read/run/open`), gated by `agent_access` |
@@ -180,7 +183,7 @@ Then open the **Terminal** rail icon. (Make sure the host has an operator bearer
 
 ## Roadmap
 
-Next: validating the experimental Windows backend. PRs welcome.
+Next: driven by real use — file an issue with what gets in your way. PRs welcome.
 
 Enabled by default once installed (the WS bearer gate is the protection) — disable
 with `plugins.disabled: [terminal]`.

@@ -13,8 +13,8 @@ enabled: true
 repository: https://github.com/protoLabsAI/terminal-plugin
 min_protoagent_version: "0.82.0"   # views (ADR 0026) + WS-through-proxy (#883) + live_config + background mount (#1640)
 
-# Linux/macOS use the stdlib PTY (no deps). Windows is EXPERIMENTAL (untested in CI)
-# and needs pywinpty — declared, NOT auto-installed (install-deps it on Windows).
+# Linux/macOS use the stdlib PTY (no deps). Windows needs pywinpty (validated in CI on a
+# real cmd.exe) — declared, NOT auto-installed (install-deps it on Windows).
 requires_pip:
   - "pywinpty>=2.0; sys_platform == 'win32'"
 

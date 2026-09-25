@@ -3,8 +3,8 @@
 Two backends behind one interface (start / read / write / resize / poll / aclose):
 - ``PtySession`` — POSIX (Linux/macOS), stdlib only (``pty``/``os``/``fcntl``/
   ``termios``); no pip deps, so the suite spawns real PTYs in CI.
-- ``WinPtySession`` — Windows, via the optional ``pywinpty`` package (EXPERIMENTAL,
-  untested in our Linux CI — see ``requires_pip`` in the manifest).
+- ``WinPtySession`` — Windows, via the optional ``pywinpty`` package (``requires_pip`` in
+  the manifest); validated by the CI windows job (tests/test_winpty.py, a real cmd.exe).
 
 ``open_session(...)`` picks the right backend for the platform. The POSIX session owns
 a child shell behind a pseudo-terminal: read its output off the master fd (in a thread,
@@ -261,9 +261,10 @@ class PtySession:
 
 
 class WinPtySession:
-    """Windows backend via the optional ``pywinpty`` package — EXPERIMENTAL (untested
-    in our Linux CI; needs a Windows validator). Same interface as ``PtySession``,
-    but on top of ``winpty.PtyProcess`` (method-based read/write, not an fd)."""
+    """Windows backend via the optional ``pywinpty`` package, validated by the CI windows
+    job. Same interface as ``PtySession``, but on top of ``winpty.PtyProcess``
+    (method-based read/write, not an fd). No ``foreground_pgid`` (no POSIX job control),
+    and ``login`` is accepted but meaningless here."""
 
     def __init__(
         self,
