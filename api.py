@@ -26,7 +26,7 @@ live shell (replaying its buffered output); none/unknown spawns a new one. A dro
 socket only detaches; ``{type:"close"}`` kills the shell.
 
 Wire protocol (JSON, modelled on protoMaker's terminal):
-  client → server: {auth, token, session?, cols?, rows?} · {input, data} ·
+  client → server: {auth, ticket|token, session?, cols?, rows?} · {input, data} ·
                    {resize, cols, rows} · {ping} · {close}
   server → client: {connected, session, shell, cwd, resumed} · {data, data} ·
                    {exit, exitCode} · {detached, reason} · {error, message} · {pong}
