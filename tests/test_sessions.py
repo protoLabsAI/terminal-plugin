@@ -182,3 +182,15 @@ async def test_a_detached_session_keeps_reading_into_its_buffer():
         assert len(sess.replay()) <= 4096
     finally:
         await sess.aclose()
+
+
+def test_connected_carries_the_cwd_notice_on_a_fresh_attach_only():
+    pty = _FakePty([])
+    pty.cwd_notice = "Starting directory '~/nope' not found — started in /home/x"
+    sess = Session("s", pty)
+    q = asyncio.Queue()
+    sess.attach(q, resumed=False)
+    assert q.get_nowait()["notice"] == pty.cwd_notice
+    q2 = asyncio.Queue()
+    sess.attach(q2, resumed=True)
+    assert "notice" not in q2.get_nowait()

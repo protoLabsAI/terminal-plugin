@@ -315,6 +315,7 @@ export function boot({ kit, BASE, CFG, xt }) {
         const lost = p.sessionId && !m.resumed;   // we asked for a shell that is gone
         if (m.resumed || lost) p.term.reset();   // a resume's replay repaints from scratch
         if (lost) p.term.write(dim("[the previous shell ended — this is a new one]"));
+        if (m.notice) p.term.write(dim("[" + m.notice + "]"));   // e.g. the starting directory is missing
         p.sessionId = m.session; p.retry = 0; p.exited = false;
         const t = tabById(p.tabId);
         if (t && m.name && !t.customName && panesOf(t.root).length === 1) t.customName = m.name;   // "Agent"

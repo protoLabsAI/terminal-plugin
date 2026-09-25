@@ -63,6 +63,40 @@ def login_argv0(shell: str) -> str:
     return "-" + os.path.basename(shell)
 
 
+# Path helpers behind one seam, so a test can swap in ``ntpath`` to exercise the
+# Windows spelling (``%USERPROFILE%``) on a POSIX runner.
+_ospath = os.path
+
+
+def home_dir() -> str:
+    """The user's home folder (``~`` — ``$HOME`` on POSIX, ``%USERPROFILE%`` on
+    Windows), or the server's working directory when home can't be resolved."""
+    try:
+        home = _ospath.expanduser("~")
+    except Exception:  # noqa: BLE001 — a broken passwd entry etc.; fall back below
+        home = ""
+    if home and home != "~" and _ospath.isdir(home):
+        return home
+    return os.getcwd()
+
+
+def resolve_cwd(cwd: str = "") -> tuple[str, str]:
+    """Where a new shell starts, plus a one-line notice ('' when none).
+
+    Blank → the user's home folder (NOT the server's cwd: the desktop app launches its
+    servers from ``/``). A configured path has ``~`` and env vars expanded
+    (``~/code``, ``$HOME/code``, ``%USERPROFILE%\\code``); if it isn't an existing
+    directory the shell starts in home instead and the notice says so."""
+    home = home_dir()
+    raw = (cwd or "").strip()
+    if not raw:
+        return home, ""
+    path = _ospath.expandvars(_ospath.expanduser(raw))
+    if _ospath.isdir(path):
+        return path, ""
+    return home, f"Starting directory {raw!r} not found — started in {home}"
+
+
 def default_shell() -> str:
     """The shell to spawn when none is configured: ``$SHELL`` then ``/bin/bash``."""
     return os.environ.get("SHELL") or "/bin/bash"
@@ -89,7 +123,7 @@ class PtySession:
     ):
         self.shell = shell or default_shell()
         self.login = bool(login)
-        self.cwd = cwd or os.getcwd()
+        self.cwd, self.cwd_notice = resolve_cwd(cwd)
         self.cols = max(1, int(cols))
         self.rows = max(1, int(rows))
         self._env_overrides = env_overrides or {}
@@ -287,7 +321,7 @@ class WinPtySession:
         login: bool = False,  # POSIX-only concept; accepted for a uniform interface
     ):
         self.shell = shell or os.environ.get("COMSPEC") or "cmd.exe"
-        self.cwd = cwd or os.getcwd()
+        self.cwd, self.cwd_notice = resolve_cwd(cwd)
         self.cols = max(1, int(cols))
         self.rows = max(1, int(rows))
         self._env_overrides = env_overrides or {}
@@ -308,7 +342,7 @@ class WinPtySession:
         except ImportError as exc:
             raise PtyError("pywinpty not installed — `pip install pywinpty` (Windows)") from exc
         self._proc = PtyProcess.spawn(
-            self.shell, cwd=self.cwd or None, env=self._build_env(), dimensions=(self.rows, self.cols)
+            self.shell, cwd=self.cwd, env=self._build_env(), dimensions=(self.rows, self.cols)
         )
         self.pid = getattr(self._proc, "pid", None)
 

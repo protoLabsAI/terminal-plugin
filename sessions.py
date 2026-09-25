@@ -176,17 +176,19 @@ class Session:
         # full-screen program is up: at a plain prompt the replay is already right, and
         # an extra SIGWINCH just makes zsh reprint its prompt (a stray "%" per reload).
         self._redraw_pending = resumed and self.alt_screen
-        queue.put_nowait(
-            {
-                "type": "connected",
-                "session": self.id,
-                "shell": self.shell,
-                "cwd": self.cwd,
-                "resumed": resumed,
-                "name": self.name,
-                "origin": self.origin,
-            }
-        )
+        connected = {
+            "type": "connected",
+            "session": self.id,
+            "shell": self.shell,
+            "cwd": self.cwd,
+            "resumed": resumed,
+            "name": self.name,
+            "origin": self.origin,
+        }
+        notice = getattr(self.pty, "cwd_notice", "")
+        if notice and not resumed:  # e.g. the configured starting directory is missing
+            connected["notice"] = notice
+        queue.put_nowait(connected)
         backlog = self.replay()
         if backlog:
             queue.put_nowait({"type": "data", "data": backlog})
