@@ -69,8 +69,10 @@ def test_view_page_has_multi_session_tabs():
 
     app = _app_js()
     assert 'id="tabs"' in PAGE and 'id="newtab"' in PAGE
-    assert "newSession" in app and "closeSession" in app and "switchTo" in app
-    assert "const sessions = new Map()" in app  # the session registry
+    assert "newTab" in app and "closeTab" in app and "switchTab" in app
+    assert "const panes = new Map()" in app  # the pane registry (each pane = one shell)
+    # split panes: a layout tree per tab, persisted by session id
+    assert "splitPane" in app and "closePane" in app and "renderLayout" in app and "mapPanes" in app
 
 
 def test_view_page_persists_sessions():
@@ -80,14 +82,14 @@ def test_view_page_persists_sessions():
     # stays mounted while hidden (bridge background opt-in) so switching views keeps shells
     assert 'type: "protoagent:subscribe", patterns: ["terminal.#"], background: true' in app
     # remembers tabs + their server session ids across reloads, and reattaches by id
-    assert "localStorage" in app and "session: s.sessionId" in app
+    assert "localStorage" in app and "session: p.sessionId" in app
     # the tab's × ends the shell explicitly (a bare disconnect only detaches)
     assert 'type: "close"' in app
     # config comes from the server, not hardcoded
     assert "__TERMINAL_CONFIG__" in PAGE and "scrollback: CFG.scrollback" in app and "CFG.fontSize" in app
     assert "prompt(" not in app  # inline rename — a sandboxed iframe can't rely on prompt()
     # a hidden pane is never fitted (it would shrink the shell to one row)
-    assert "if (!s.el.offsetWidth || !s.el.offsetHeight) return;" in app
+    assert "if (!p.el.offsetWidth || !p.el.offsetHeight) return;" in app
 
 
 def test_view_integrates_with_the_console():
@@ -112,7 +114,7 @@ def test_every_static_file_the_page_loads_is_served():
     import re
 
     names = set(re.findall(r'"([\w.-]+\.(?:js|css))"', PAGE)) - {"plugin-kit.js", "plugin-kit.css"}
-    names |= {"logic.js"}  # imported by terminal.js
+    names |= {"logic.js", "layout.js"}  # imported by terminal.js
     assert names <= set(api._STATIC), names - set(api._STATIC)
     for name, (folder, _media) in api._STATIC.items():
         assert (folder / name).is_file(), name

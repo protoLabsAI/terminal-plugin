@@ -16,8 +16,8 @@ live shell (replaying its buffered output); none/unknown spawns a new one. A dro
 socket only detaches; ``{type:"close"}`` kills the shell.
 
 Wire protocol (JSON, modelled on protoMaker's terminal):
-  client → server: {auth, token, session?, cols?, rows?} · {input, data} ·
-                   {resize, cols, rows} · {ping} · {close}
+  client → server: {auth, token, session?, cols?, rows?, cwd_from?} · {input, data} ·
+                   {resize, cols, rows} · {ping} · {focus} · {close}
   server → client: {connected, session, shell, cwd, resumed} · {data, data} ·
                    {exit, exitCode} · {detached, reason} · {error, message} · {pong}
 """
@@ -34,6 +34,7 @@ from pathlib import Path
 
 from fastapi import WebSocket  # module-level so the websocket route's annotation resolves
 
+from .procinfo import cwd_of
 from .sessions import MANAGER, SessionLimitError
 from .view import PAGE
 
@@ -75,6 +76,7 @@ _STATIC = {
     "addon-unicode11.js": (_ROOT / "vendor", _JS),
     "terminal.js": (_ROOT / "web", _JS),
     "logic.js": (_ROOT / "web", _JS),
+    "layout.js": (_ROOT / "web", _JS),
 }
 
 
@@ -249,10 +251,17 @@ async def _bridge(ws, hello: dict, conf) -> None:
     sess = MANAGER.get(str(hello.get("session") or ""))
     resumed = sess is not None
     if sess is None:
+        cwd = cfg["cwd"]
+        # A split pane starts where the pane it split from is (its shell's live cwd).
+        source = MANAGER.get(str(hello.get("cwd_from") or ""))
+        if source is not None and source.pty.pid:
+            here = await asyncio.to_thread(cwd_of, source.pty.pid)
+            if here and os.path.isdir(here):
+                cwd = here
         try:
             sess = MANAGER.create(
                 shell=cfg["shell"],
-                cwd=cfg["cwd"],
+                cwd=cwd,
                 login=cfg["login_shell"],
                 cols=_num(hello.get("cols"), 80, 1, 1000),
                 rows=_num(hello.get("rows"), 24, 1, 1000),

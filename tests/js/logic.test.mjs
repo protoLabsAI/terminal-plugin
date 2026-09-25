@@ -58,6 +58,17 @@ test("linux: Ctrl+<letter> belongs to the shell — terminal chords use Ctrl+Shi
   assert.equal(keyAction(ev("2", { altKey: true }), LINUX), null);   // readline digit-argument
 });
 
+test("split panes: ⌘D / ⌘⇧D (mac), Ctrl+Shift+E / O (else); pane focus", () => {
+  const act = (mac, key, mods) => (keyAction(ev(key, mods), mac) || {}).action;
+  assert.equal(act(MAC, "d", { metaKey: true }), "splitRight");
+  assert.equal(act(MAC, "D", { metaKey: true, shiftKey: true }), "splitDown");
+  assert.equal(act(MAC, "]", { metaKey: true }), "focusNextPane");
+  assert.equal(act(MAC, "ArrowLeft", { metaKey: true, altKey: true }), "focusPrevPane");
+  assert.equal(act(LINUX, "E", { ctrlKey: true, shiftKey: true }), "splitRight");
+  assert.equal(act(LINUX, "O", { ctrlKey: true, shiftKey: true }), "splitDown");
+  assert.equal(keyAction(ev("d", { ctrlKey: true }), LINUX), null);   // ^D (EOF) stays the shell's
+});
+
 test("linux: only Ctrl+Shift chords and Ctrl+, are forwarded to the console", () => {
   assert.deepEqual(keyAction(ev("K", { ctrlKey: true, shiftKey: true }), LINUX), { forward: "mod+shift+k" });
   assert.deepEqual(keyAction(ev(",", { ctrlKey: true }), LINUX), { forward: "mod+," });

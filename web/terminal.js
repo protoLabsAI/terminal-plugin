@@ -1,13 +1,15 @@
 // The terminal view app. Loaded by the page's bootstrap (view.py) AFTER the DS kit and the
 // vendored xterm bundles; `boot(ctx)` receives { kit, BASE, CFG, xt } where xt holds the
-// xterm constructors. Pure logic (keys, theme maths, labels) lives in logic.js.
+// xterm constructors. Pure logic lives in logic.js (keys, theme, labels) and layout.js
+// (split-pane trees).
 //
-// Sessions: each tab owns an xterm attached over its own WebSocket to a server-side shell
-// by id. Shells OUTLIVE the socket (sessions.py): the view stays mounted while hidden,
-// remembers tabs across reloads, and reattaches (replaying missed output) after a drop.
-// Only the tab's × ends the shell.
+// Model: TABS hold a layout tree of PANES (layout.js). Each pane is one xterm attached over
+// its own WebSocket to a server-side shell by id. Shells OUTLIVE the socket (sessions.py):
+// the view stays mounted while hidden, remembers tabs + layouts across reloads, and
+// reattaches (replaying missed output) after a drop. Closing a pane or tab ends its shells.
 
 import { keyAction, buildTheme, tabLabel, clampFont } from "./logic.js";
+import { leaf, panesOf, split, remove, neighbor, resize, mapPanes, validate } from "./layout.js";
 
 const IS_MAC = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
 const $ = (id) => document.getElementById(id);
@@ -47,9 +49,9 @@ export function boot({ kit, BASE, CFG, xt }) {
   let theme = xtermTheme();
   function applyTheme() {
     theme = xtermTheme();
-    for (const s of sessions.values()) { try { s.term.options.theme = theme; } catch (e) {} }
+    for (const p of panes.values()) { try { p.term.options.theme = theme; } catch (e) {} }
   }
-  // Live re-theme: the kit re-sets the --pl-* vars on :root → rebuild every tab's theme.
+  // Live re-theme: the kit re-sets the --pl-* vars on :root → rebuild every pane's theme.
   new MutationObserver(applyTheme).observe(document.documentElement, { attributes: true, attributeFilter: ["style", "class", "data-theme"] });
 
   // The canvas/WebGL renderers build a font string that can't resolve var() — resolve the
@@ -57,165 +59,271 @@ export function boot({ kit, BASE, CFG, xt }) {
   const monoVar = getComputedStyle(document.documentElement).getPropertyValue("--pl-font-mono").replace(/['"]/g, "").trim();
   const MONO = CFG.fontFamily || ((monoVar ? monoVar + ", " : "") + "Menlo, Monaco, 'Courier New', monospace");
 
-  // ── per-agent persisted UI state (tabs + zoom) ────────────────────────────────
+  // ── per-agent persisted UI state (tabs, layouts, zoom) ────────────────────────
   const STORE = "protoagent.terminal.tabs:" + (BASE || "/");
   const ZOOM = "protoagent.terminal.fontSize:" + (BASE || "/");
   const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
   const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} };
   let fontSize = clampFont(lsGet(ZOOM) || CFG.fontSize, CFG.fontSize);
 
-  const sessions = new Map();   // id → session state (see newSession)
-  let activeId = null;
-  let counter = 0;
+  const panes = new Map();   // paneId → pane (one xterm + socket + server shell)
+  const tabs = [];           // [{ id, name, customName, root, activePane, el }]
+  let activeTabId = null;
+  let paneSeq = 0, tabSeq = 0;
+  let booted = false;
+
+  const tabById = (id) => tabs.find((t) => t.id === id) || null;
+  const activeTab = () => tabById(activeTabId);
+  const activePane = () => { const t = activeTab(); return t ? panes.get(t.activePane) || null : null; };
 
   function save() {
-    const all = [...sessions.values()];
     lsSet(STORE, JSON.stringify({
-      active: all.findIndex((s) => s.id === activeId),
-      tabs: all.map((s) => ({ name: s.name, customName: s.customName || null, session: s.sessionId || null })),
+      active: tabs.findIndex((t) => t.id === activeTabId),
+      tabs: tabs.map((t) => ({
+        name: t.name, customName: t.customName || null,
+        // Session ids ("" = a pane whose shell hasn't connected yet → a fresh one).
+        layout: mapPanes(t.root, (id) => { const p = panes.get(id); return p ? (p.sessionId || "") : null; }),
+        activeIndex: Math.max(0, panesOf(t.root).indexOf(t.activePane)),
+      })),
     }));
   }
-  function load() { try { return JSON.parse(lsGet(STORE) || "null"); } catch (e) { return null; } }
+  function load() {
+    let raw; try { raw = JSON.parse(lsGet(STORE) || "null"); } catch (e) { return []; }
+    if (!raw || !Array.isArray(raw.tabs)) return [];
+    const out = raw.tabs.map((t) => ({
+      name: t && t.name, customName: t && t.customName,
+      // v0.5–0.7 saved one session per tab; v0.8+ saves a layout tree.
+      layout: (t && validate(t.layout)) || leaf((t && t.session) || ""),
+      activeIndex: (t && t.activeIndex) || 0,
+    }));
+    out.active = raw.active;
+    return out;
+  }
 
   // ── status + socket plumbing ──────────────────────────────────────────────────
   // The shell/cwd readout truncates from the LEFT (direction: rtl) so the cwd's tail stays
   // visible; LRM marks keep the path's own punctuation ("/bin/zsh") from being reordered.
-  function setMeta(text) { $("shell").textContent = text ? "\u200E" + text + "\u200E" : ""; $("shell").title = text || ""; }
+  function setMeta(text) { $("shell").textContent = text ? "‎" + text + "‎" : ""; $("shell").title = text || ""; }
   function setStatus(text, cls) { $("status").textContent = text; $("dot").className = "dot" + (cls ? " " + cls : ""); }
-  function setS(s, text, cls) { s.status = text; s.statusCls = cls; if (s.id === activeId) setStatus(text, cls); }
+  const isActive = (p) => { const t = activeTab(); return !!t && t.activePane === p.id; };
+  function setS(p, text, cls) { p.status = text; p.statusCls = cls; if (isActive(p)) setStatus(text, cls); refreshTab(tabById(p.tabId)); }
   // The bearer goes in the FIRST frame, never the URL (URLs leak into logs + history).
   const wsUrl = () => (location.protocol === "https:" ? "wss:" : "ws:") + "//" + location.host + BASE + "/plugins/terminal/ws";
-  const send = (s, obj) => { if (s.ws && s.ws.readyState === 1) s.ws.send(JSON.stringify(obj)); };
+  const send = (p, obj) => { if (p && p.ws && p.ws.readyState === 1) p.ws.send(JSON.stringify(obj)); };
 
   // Fit only a VISIBLE pane: a hidden one (another tab, or the whole view backgrounded)
   // measures 0×0 and the fit addon would shrink the shell to one row — reflowing every
   // prompt and garbling any TUI running in it.
-  function fit(s) {
-    if (!s.el.offsetWidth || !s.el.offsetHeight) return;
-    try { s.fit.fit(); } catch (e) {}
-    if (s.term.cols !== s.sentCols || s.term.rows !== s.sentRows) {
-      s.sentCols = s.term.cols; s.sentRows = s.term.rows;
-      send(s, { type: "resize", cols: s.term.cols, rows: s.term.rows });
+  function fit(p) {
+    if (!p.el.offsetWidth || !p.el.offsetHeight) return;
+    try { p.fit.fit(); } catch (e) {}
+    if (p.term.cols !== p.sentCols || p.term.rows !== p.sentRows) {
+      p.sentCols = p.term.cols; p.sentRows = p.term.rows;
+      send(p, { type: "resize", cols: p.term.cols, rows: p.term.rows });
     }
   }
+  function fitTab(t) { if (t) for (const id of panesOf(t.root)) { const p = panes.get(id); if (p) fit(p); } }
 
-  // ── tabs ──────────────────────────────────────────────────────────────────────
+  // ── the tab bar ───────────────────────────────────────────────────────────────
+  function labelOf(t) {
+    const p = panes.get(t.activePane);
+    return tabLabel({ customName: t.customName, title: p ? p.title : "", name: t.name });
+  }
   function renderTabs() {
-    const tabs = $("tabs"); tabs.innerHTML = "";
-    for (const s of sessions.values()) {
+    const bar = $("tabs"); bar.innerHTML = "";
+    for (const t of tabs) {
+      const p = panes.get(t.activePane);
+      const n = panesOf(t.root).length;
       const b = document.createElement("div");
-      b.className = "tab" + (s.id === activeId ? " active" : ""); b.dataset.id = s.id;
-      b.title = (s.customName ? "" : (s.title || "")) + (s.title && !s.customName ? " — " : "") + "double-click to rename";
-      const dot = document.createElement("span"); dot.className = "tdot " + (s.statusCls || "");
-      const lbl = document.createElement("span"); lbl.className = "lbl"; lbl.textContent = tabLabel(s);
-      const x = document.createElement("span"); x.className = "x"; x.textContent = "×"; x.title = "Close (ends the shell)";
-      b.append(dot, lbl, x); tabs.appendChild(b);
-      b.onclick = (e) => { if (e.target === x) closeSession(s.id); else if (!b.querySelector("input")) switchTo(s.id); };
-      b.ondblclick = (e) => { if (e.target !== x) rename(s); };
-      b.onauxclick = (e) => { if (e.button === 1) closeSession(s.id); };   // middle-click closes
+      b.className = "tab" + (t.id === activeTabId ? " active" : ""); b.dataset.id = t.id;
+      b.setAttribute("role", "tab"); b.setAttribute("aria-selected", t.id === activeTabId);
+      b.title = (t.customName ? "" : ((p && p.title) || "")) + (p && p.title && !t.customName ? " — " : "") + "double-click to rename";
+      const dot = document.createElement("span"); dot.className = "tdot " + ((p && p.statusCls) || "");
+      const lbl = document.createElement("span"); lbl.className = "lbl"; lbl.textContent = labelOf(t);
+      b.append(dot, lbl);
+      if (n > 1) { const c = document.createElement("span"); c.className = "npanes"; c.textContent = n; c.title = n + " panes"; b.append(c); }
+      const x = document.createElement("span"); x.className = "x"; x.textContent = "×"; x.title = "Close tab (ends its shells)";
+      b.append(x); bar.appendChild(b);
+      b.onclick = (e) => { if (e.target === x) closeTab(t.id); else if (!b.querySelector("input")) switchTab(t.id); };
+      b.ondblclick = (e) => { if (e.target !== x) rename(t); };
+      b.onauxclick = (e) => { if (e.button === 1) closeTab(t.id); };   // middle-click closes
     }
   }
-  function refreshTab(s) {
-    const el = $("tabs").querySelector('.tab[data-id="' + s.id + '"]');
+  function refreshTab(t) {
+    if (!t) return;
+    const el = $("tabs").querySelector('.tab[data-id="' + t.id + '"]');
     if (!el) return renderTabs();
-    const lbl = el.querySelector(".lbl"); if (lbl) lbl.textContent = tabLabel(s);
-    const dot = el.querySelector(".tdot"); if (dot) dot.className = "tdot " + (s.statusCls || "");
+    const p = panes.get(t.activePane);
+    const lbl = el.querySelector(".lbl"); if (lbl) lbl.textContent = labelOf(t);
+    const dot = el.querySelector(".tdot"); if (dot) dot.className = "tdot " + ((p && p.statusCls) || "");
   }
 
   // Inline rename (a sandboxed iframe cannot rely on a native dialog). Clearing the name
   // hands the label back to the program-set title.
-  function rename(s) {
-    const el = $("tabs").querySelector('.tab[data-id="' + s.id + '"]'); if (!el) return;
+  function rename(t) {
+    const el = $("tabs").querySelector('.tab[data-id="' + t.id + '"]'); if (!el) return;
     const lbl = el.querySelector(".lbl");
-    const inp = document.createElement("input"); inp.className = "rename"; inp.value = s.customName || tabLabel(s);
+    const inp = document.createElement("input"); inp.className = "rename"; inp.value = t.customName || labelOf(t);
     lbl.replaceWith(inp); inp.focus(); inp.select();
     let done = false;
     const finish = (commit) => {
       if (done) return; done = true;
-      if (commit) { s.customName = inp.value.trim() || null; save(); }
-      renderTabs(); s.term.focus();
+      if (commit) { t.customName = inp.value.trim() || null; save(); }
+      renderTabs(); const p = activePane(); if (p) p.term.focus();
     };
     inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") finish(true); else if (e.key === "Escape") finish(false); };
     inp.onblur = () => finish(true);
     inp.onclick = (e) => e.stopPropagation();
   }
 
-  function switchTo(id) {
-    activeId = id;
-    for (const s of sessions.values()) s.el.classList.toggle("active", s.id === id);
+  // ── layout rendering (split panes) ────────────────────────────────────────────
+  // Rebuild a tab body from its tree. Pane elements are MOVED, never recreated, so the
+  // xterms (and their scrollback, renderers, sockets) survive every split/close.
+  function renderLayout(t) {
+    const build = (node, path) => {
+      if (node.pane) { const p = panes.get(node.pane); return p ? p.el : document.createElement("div"); }
+      const box = document.createElement("div"); box.className = "split " + node.dir;
+      node.children.forEach((child, i) => {
+        if (i > 0) {
+          const d = document.createElement("div"); d.className = "divider";
+          d.setAttribute("role", "separator"); d.setAttribute("aria-orientation", node.dir === "row" ? "vertical" : "horizontal");
+          d.addEventListener("mousedown", (e) => startDrag(e, t, path, i - 1, box));
+          box.appendChild(d);
+        }
+        const el = build(child, path.concat(i));
+        el.style.flex = node.sizes[i] + " 1 0";
+        box.appendChild(el);
+      });
+      return box;
+    };
+    for (const id of panesOf(t.root)) { const p = panes.get(id); if (p) p.el.style.flex = ""; }
+    const root = build(t.root, []);
+    root.style.flex = "1 1 0";
+    t.el.replaceChildren(root);
+    t.el.classList.toggle("multi", panesOf(t.root).length > 1);
+    markActivePane(t);
+    requestAnimationFrame(() => fitTab(t));
+  }
+  function markActivePane(t) {
+    for (const id of panesOf(t.root)) { const p = panes.get(id); if (p) p.el.classList.toggle("active", id === t.activePane); }
+  }
+
+  // Divider drag: live flex updates on the two neighbours, one tree update + save + refit
+  // at the end. A full-window shield keeps the drag from being eaten by a canvas.
+  function startDrag(e, t, path, i, box) {
+    e.preventDefault();
+    const kids = [...box.children].filter((c) => !c.classList.contains("divider"));
+    const a = kids[i], b = kids[i + 1]; if (!a || !b) return;
+    const row = box.classList.contains("row");
+    const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+    const start = row ? ra.left : ra.top, span = row ? ra.width + rb.width : ra.height + rb.height;
+    const growA = parseFloat(a.style.flex) || 0.5, growB = parseFloat(b.style.flex) || 0.5, pair = growA + growB;
+    const shield = document.createElement("div"); shield.className = "drag-shield " + (row ? "row" : "col");
+    document.body.appendChild(shield);
+    let frac = growA / pair;
+    const move = (ev) => {
+      frac = Math.max(0.08, Math.min(0.92, ((row ? ev.clientX : ev.clientY) - start) / span));
+      a.style.flex = pair * frac + " 1 0"; b.style.flex = pair * (1 - frac) + " 1 0";
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); shield.remove();
+      t.root = resize(t.root, path, i, frac); save(); fitTab(t);
+      const p = activePane(); if (p) p.term.focus();
+    };
+    window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
+  }
+
+  // ── focus: tabs and panes ─────────────────────────────────────────────────────
+  function switchTab(id) {
+    const t = tabById(id); if (!t) return;
+    activeTabId = id;
+    for (const x of tabs) x.el.classList.toggle("active", x.id === id);
     // Toggle, don't rebuild: re-rendering the tab bar between the two clicks of a
     // double-click would swap the node out from under it and the rename would never fire.
     const tabEls = $("tabs").querySelectorAll(".tab");
-    if (tabEls.length !== sessions.size) renderTabs();
-    else tabEls.forEach((el) => el.classList.toggle("active", el.dataset.id === id));
-    save();
-    const s = sessions.get(id);
-    if (s) {
-      send(s, { type: "focus" });   // "active" for the agent's terminal_read
-      closeFind();
-      fit(s); s.term.focus();
-      setMeta(s.meta); setStatus(s.status || "…", s.statusCls);
-      const el = $("tabs").querySelector('.tab[data-id="' + id + '"]');
-      if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest", inline: "nearest" });
-    }
+    if (tabEls.length !== tabs.length) renderTabs();
+    else tabEls.forEach((el) => { const on = el.dataset.id === id; el.classList.toggle("active", on); el.setAttribute("aria-selected", on); });
+    const el = $("tabs").querySelector('.tab[data-id="' + id + '"]');
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest", inline: "nearest" });
+    focusPane(t.activePane);
   }
-  const ordered = () => [...sessions.keys()];
-  function cycle(delta) {
-    const ids = ordered(); if (ids.length < 2) return;
-    switchTo(ids[(ids.indexOf(activeId) + delta + ids.length) % ids.length]);
+  function focusPane(id) {
+    const p = panes.get(id); if (!p) return;
+    const t = tabById(p.tabId); if (!t) return;
+    if (t.id !== activeTabId) { t.activePane = id; return switchTab(t.id); }
+    t.activePane = id;
+    markActivePane(t);
+    send(p, { type: "focus" });   // "active" for the agent's terminal_read
+    closeFind();
+    fitTab(t); p.term.focus();
+    setMeta(p.meta); setStatus(p.status || "…", p.statusCls);
+    refreshTab(t);
+    save();
+  }
+  function cycleTab(delta) {
+    if (tabs.length < 2) return;
+    const i = tabs.findIndex((t) => t.id === activeTabId);
+    switchTab(tabs[(i + delta + tabs.length) % tabs.length].id);
+  }
+  function cyclePane(delta) {
+    const t = activeTab(); if (!t) return;
+    focusPane(neighbor(t.root, t.activePane, delta));
   }
 
   // ── connection ────────────────────────────────────────────────────────────────
-  function connect(s) {
-    clearTimeout(s.retryTimer);
+  function connect(p) {
+    clearTimeout(p.retryTimer);
     const ws = new WebSocket(wsUrl());
-    s.ws = ws; s.detached = false; s.fatal = ""; s.sentCols = 0; s.sentRows = 0;
-    setS(s, s.retry ? "reconnecting…" : "connecting…", "");
+    p.ws = ws; p.detached = false; p.fatal = ""; p.sentCols = 0; p.sentRows = 0;
+    setS(p, p.retry ? "reconnecting…" : "connecting…", "");
     ws.onopen = () => {
       const tok = (kit.getToken && kit.getToken()) || "";
-      ws.send(JSON.stringify({ type: "auth", token: tok, session: s.sessionId || null, cols: s.term.cols, rows: s.term.rows }));
+      ws.send(JSON.stringify({ type: "auth", token: tok, session: p.sessionId || null, cols: p.term.cols, rows: p.term.rows,
+                               cwd_from: p.cwdFrom || null }));
+      p.cwdFrom = null;   // only a brand-new shell starts "where the other pane is"
     };
     ws.onmessage = (e) => {
       let m; try { m = JSON.parse(e.data); } catch (_) { return; }
-      if (m.type === "data") s.term.write(m.data);
+      if (m.type === "data") p.term.write(m.data);
       else if (m.type === "connected") {
-        const lost = s.sessionId && !m.resumed;   // we asked for a shell that is gone
-        if (m.resumed || lost) s.term.reset();   // a resume's replay repaints from scratch
-        if (lost) s.term.write(dim("[the previous shell ended — this is a new one]"));
-        s.sessionId = m.session; s.retry = 0; s.exited = false;
-        if (m.name && !s.customName) s.customName = m.name;   // a tab the agent named ("Agent")
-        s.origin = m.origin || s.origin;
+        const lost = p.sessionId && !m.resumed;   // we asked for a shell that is gone
+        if (m.resumed || lost) p.term.reset();   // a resume's replay repaints from scratch
+        if (lost) p.term.write(dim("[the previous shell ended — this is a new one]"));
+        p.sessionId = m.session; p.retry = 0; p.exited = false;
+        const t = tabById(p.tabId);
+        if (t && m.name && !t.customName && panesOf(t.root).length === 1) t.customName = m.name;   // "Agent"
+        p.origin = m.origin || p.origin;
         save();
-        if (s.id === activeId) send(s, { type: "focus" });
-        s.meta = (m.shell || "") + "  " + (m.cwd || "");
-        if (s.id === activeId) setMeta(s.meta);
-        setS(s, m.resumed ? "reattached" : "connected", "ok"); refreshTab(s);
-        fit(s);
+        if (isActive(p)) send(p, { type: "focus" });
+        p.meta = (m.shell || "") + "  " + (m.cwd || "");
+        if (isActive(p)) setMeta(p.meta);
+        setS(p, m.resumed ? "reattached" : "connected", "ok");
+        fit(p);
       }
       else if (m.type === "exit") {
-        s.exited = true; s.sessionId = null; save();
-        s.term.write(dim("[process exited" + (m.exitCode != null ? " (" + m.exitCode + ")" : "") + (m.error ? ": " + m.error : "") + " — press any key for a new shell]"));
+        p.exited = true; p.sessionId = null; save();
+        p.term.write(dim("[process exited" + (m.exitCode != null ? " (" + m.exitCode + ")" : "") + (m.error ? ": " + m.error : "") + " — press any key for a new shell]"));
       }
-      else if (m.type === "detached") { s.detached = true; s.term.write(dim("[opened in another window — press any key to take it back]")); }
-      else if (m.type === "error") { s.fatal = m.message || "error"; s.term.write("\r\n\x1b[31m" + s.fatal + "\x1b[0m\r\n"); }
+      else if (m.type === "detached") { p.detached = true; p.term.write(dim("[opened in another window — press any key to take it back]")); }
+      else if (m.type === "error") { p.fatal = m.message || "error"; p.term.write("\r\n\x1b[31m" + p.fatal + "\x1b[0m\r\n"); }
     };
     ws.onclose = (e) => {
-      if (s.ws !== ws || s.closing) return;   // superseded, or the tab was closed
-      if (s.exited) { setS(s, "exited", "bad"); return refreshTab(s); }
-      if (s.detached) { setS(s, "detached", "bad"); return refreshTab(s); }
-      if (e.code === 4001) { setS(s, "unauthorized", "bad"); return refreshTab(s); }
-      if (s.fatal) { setS(s, "error", "bad"); return refreshTab(s); }
+      if (p.ws !== ws || p.closing) return;   // superseded, or the pane was closed
+      if (p.exited) return setS(p, "exited", "bad");
+      if (p.detached) return setS(p, "detached", "bad");
+      if (e.code === 4001) return setS(p, "unauthorized", "bad");
+      if (p.fatal) return setS(p, "error", "bad");
       // An unexpected drop: the shell is still alive server-side — reattach with backoff.
-      const delay = Math.min(10000, 500 * Math.pow(2, s.retry++));
-      setS(s, "reconnecting…", ""); refreshTab(s);
-      s.retryTimer = setTimeout(() => connect(s), delay);
+      const delay = Math.min(10000, 500 * Math.pow(2, p.retry++));
+      setS(p, "reconnecting…", "");
+      p.retryTimer = setTimeout(() => connect(p), delay);
     };
   }
 
   // ── renderer ──────────────────────────────────────────────────────────────────
   // WebGL first (fastest; draws block/box glyphs as exact cell shapes with customGlyphs),
-  // canvas when WebGL is unavailable or its context is lost (browsers cap live contexts),
-  // and xterm's DOM renderer as the last resort.
+  // canvas when WebGL is unavailable or its context is lost (browsers cap live contexts —
+  // many panes can hit it), and xterm's DOM renderer as the last resort.
   function attachRenderer(term) {
     const canvas = () => { try { term.loadAddon(new CanvasAddon()); } catch (e) {} };
     if (WebglAddon) {
@@ -229,10 +337,11 @@ export function boot({ kit, BASE, CFG, xt }) {
     canvas();
   }
 
-  // ── a session (tab) ───────────────────────────────────────────────────────────
-  function newSession(saved) {
-    const id = "t" + (++counter);
-    const el = document.createElement("div"); el.className = "termpane"; el.dataset.id = id; $("terms").appendChild(el);
+  // ── panes ─────────────────────────────────────────────────────────────────────
+  function newPane(tabId, { session = "", cwdFrom = null } = {}) {
+    const id = "p" + (++paneSeq);
+    const el = document.createElement("div"); el.className = "pane"; el.dataset.id = id;
+    const host = document.createElement("div"); host.className = "xhost"; el.appendChild(host);
     const term = new Terminal({
       cursorBlink: true, cursorStyle: CFG.cursorStyle, fontSize, scrollback: CFG.scrollback,
       fontFamily: MONO, lineHeight: 1.0, customGlyphs: true, allowProposedApi: true,
@@ -245,47 +354,96 @@ export function boot({ kit, BASE, CFG, xt }) {
     if (Unicode11Addon) { try { term.loadAddon(new Unicode11Addon()); term.unicode.activeVersion = "11"; } catch (e) {} }
     const search = SearchAddon ? new SearchAddon() : null;
     if (search) term.loadAddon(search);
-    term.open(el);
+    // xterm needs a laid-out host to measure; open into the (possibly detached) element and
+    // let the first renderLayout + fit size it.
+    $("staging").appendChild(el);
+    term.open(host);
     attachRenderer(term);
 
-    const s = { id, name: (saved && saved.name) || "Terminal " + counter, customName: (saved && saved.customName) || null,
-                title: "", sessionId: (saved && saved.session) || null, origin: "operator", term, fit: fitA, search, ws: null, el,
-                status: "connecting…", statusCls: "", exited: false, detached: false, closing: false,
+    const p = { id, tabId, sessionId: session || null, cwdFrom, origin: "operator", title: "", term, fit: fitA, search,
+                ws: null, el, status: "connecting…", statusCls: "", exited: false, detached: false, closing: false,
                 retry: 0, retryTimer: 0, fatal: "", meta: "", sentCols: 0, sentRows: 0 };
 
     term.onData((d) => {
-      if (s.exited) { s.exited = false; s.term.reset(); connect(s); return; }   // any key → a new shell
-      if (s.detached) { connect(s); return; }                                  // any key → take it back
-      send(s, { type: "input", data: d });
+      if (p.exited) { p.exited = false; p.term.reset(); connect(p); return; }   // any key → a new shell
+      if (p.detached) { connect(p); return; }                                  // any key → take it back
+      send(p, { type: "input", data: d });
     });
-    term.onBinary((d) => send(s, { type: "input", data: d }));
-    // Programs name themselves (OSC 0/2: "vim foo.py", "~/dev") — the tab follows unless
-    // the operator renamed it.
-    term.onTitleChange((t) => { s.title = t; if (!s.customName) refreshTab(s); });
-    term.onSelectionChange(() => {
-      if (CFG.copyOnSelect && term.hasSelection()) writeClipboard(term.getSelection());
-    });
-    term.attachCustomKeyEventHandler((e) => handleKey(s, e));
-    el.addEventListener("contextmenu", (e) => { e.preventDefault(); openMenu(s, e); });
-
-    sessions.set(id, s);
-    watchResults(s);
-    connect(s);
-    if (!saved) switchTo(id);
-    return s;
+    term.onBinary((d) => send(p, { type: "input", data: d }));
+    // Programs name themselves (OSC 0/2: "vim foo.py", "~/dev") — the tab follows its
+    // active pane's title unless the operator renamed it.
+    term.onTitleChange((title) => { p.title = title; const t = tabById(p.tabId); if (t && t.activePane === p.id && !t.customName) refreshTab(t); });
+    term.onSelectionChange(() => { if (CFG.copyOnSelect && term.hasSelection()) writeClipboard(term.getSelection()); });
+    term.attachCustomKeyEventHandler((e) => handleKey(p, e));
+    // Clicking into a pane makes it the active one (capture: before xterm eats the event).
+    el.addEventListener("mousedown", () => { if (!isActive(p)) focusPane(p.id); }, true);
+    el.addEventListener("contextmenu", (e) => { e.preventDefault(); openMenu(p, e); });
+    if (search && search.onDidChangeResults) {
+      search.onDidChangeResults(({ resultIndex, resultCount }) => {
+        if (!isActive(p)) return;
+        $("findn").textContent = resultCount ? (resultIndex >= 0 ? resultIndex + 1 : "?") + "/" + resultCount + (resultCount >= 1000 ? "+" : "") : "0";
+      });
+    }
+    panes.set(id, p);
+    connect(p);
+    return p;
   }
 
-  function closeSession(id) {
-    const s = sessions.get(id); if (!s) return;
-    s.closing = true; clearTimeout(s.retryTimer);
-    send(s, { type: "close" });   // ends the shell (a bare disconnect would only detach)
-    try { if (s.ws) s.ws.close(); } catch (e) {}
-    try { s.term.dispose(); } catch (e) {}
-    s.el.remove(); sessions.delete(id);
-    if (activeId === id) {
-      const next = sessions.keys().next().value;
-      if (next) switchTo(next); else newSession();  // always keep at least one terminal
+  function disposePane(p) {
+    p.closing = true; clearTimeout(p.retryTimer);
+    send(p, { type: "close" });   // ends the shell (a bare disconnect would only detach)
+    try { if (p.ws) p.ws.close(); } catch (e) {}
+    try { p.term.dispose(); } catch (e) {}
+    p.el.remove(); panes.delete(p.id);
+  }
+
+  // ── tabs ──────────────────────────────────────────────────────────────────────
+  function newTab({ name, customName = null, layout = null, activeIndex = 0, focus = true } = {}) {
+    const id = "t" + (++tabSeq);
+    const el = document.createElement("div"); el.className = "tabbody"; el.dataset.id = id; $("terms").appendChild(el);
+    const t = { id, name: name || "Terminal " + tabSeq, customName: customName || null, root: null, activePane: null, el };
+    tabs.push(t);
+    // The saved tree carries session ids; swap each for a live pane attached to it.
+    t.root = mapPanes(layout || leaf(""), (sid) => newPane(id, { session: sid }).id) || leaf(newPane(id).id);
+    const ids = panesOf(t.root);
+    t.activePane = ids[Math.min(Math.max(0, activeIndex), ids.length - 1)];
+    renderLayout(t);
+    renderTabs();
+    if (focus || tabs.length === 1) switchTab(id); else save();
+    return t;
+  }
+
+  function closeTab(id) {
+    const i = tabs.findIndex((t) => t.id === id); if (i < 0) return;
+    const t = tabs[i];
+    for (const pid of panesOf(t.root)) { const p = panes.get(pid); if (p) disposePane(p); }
+    t.el.remove(); tabs.splice(i, 1);
+    if (activeTabId === id) {
+      const next = tabs[Math.min(i, tabs.length - 1)];
+      if (next) switchTab(next.id); else newTab();   // always keep at least one terminal
     } else { renderTabs(); save(); }
+  }
+
+  function splitPane(dir) {
+    const t = activeTab(), from = activePane(); if (!t || !from) return;
+    // The new shell starts where the pane it split from is (the server resolves its cwd).
+    const fresh = newPane(t.id, { cwdFrom: from.sessionId });
+    t.root = split(t.root, from.id, fresh.id, dir);
+    t.activePane = fresh.id;
+    renderLayout(t); renderTabs();
+    focusPane(fresh.id);
+  }
+
+  function closePane(id) {
+    const p = panes.get(id); if (!p) return;
+    const t = tabById(p.tabId);
+    if (!t || panesOf(t.root).length === 1) return closeTab(p.tabId);   // the last pane closes the tab
+    const next = neighbor(t.root, id, -1);
+    disposePane(p);
+    t.root = remove(t.root, id);
+    t.activePane = next;
+    renderLayout(t); renderTabs();
+    focusPane(next);
   }
 
   // ── clipboard ─────────────────────────────────────────────────────────────────
@@ -298,35 +456,40 @@ export function boot({ kit, BASE, CFG, xt }) {
     const ta = document.createElement("textarea"); ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
     document.body.appendChild(ta); ta.select(); try { document.execCommand("copy"); } catch (e) {} ta.remove();
   }
-  async function paste(s) {
-    try { const t = await navigator.clipboard.readText(); if (t) s.term.paste(t); } catch (e) { /* no read permission */ }
-    s.term.focus();
+  async function paste(p) {
+    try { const text = await navigator.clipboard.readText(); if (text) p.term.paste(text); } catch (e) { /* no read permission */ }
+    p.term.focus();
   }
 
   // ── font zoom (per agent, persisted) ──────────────────────────────────────────
   function setFont(n) {
     fontSize = clampFont(n, CFG.fontSize);
     lsSet(ZOOM, fontSize === CFG.fontSize ? null : String(fontSize));
-    for (const s of sessions.values()) { s.term.options.fontSize = fontSize; }
-    const a = sessions.get(activeId); if (a) fit(a);
+    for (const p of panes.values()) { p.term.options.fontSize = fontSize; }
+    fitTab(activeTab());
   }
 
   // ── actions (keys + context menu share these) ─────────────────────────────────
-  function run(s, action, arg) {
+  function run(p, action, arg) {
     switch (action) {
-      case "copy": if (s.term.hasSelection()) { writeClipboard(s.term.getSelection()); s.term.clearSelection(); } return;
-      case "paste": return void paste(s);
-      case "selectAll": return s.term.selectAll();
-      case "clear": s.term.clearSelection(); s.term.clear(); return s.term.focus();
+      case "copy": if (p.term.hasSelection()) { writeClipboard(p.term.getSelection()); p.term.clearSelection(); } return;
+      case "paste": return void paste(p);
+      case "selectAll": return p.term.selectAll();
+      case "clear": p.term.clearSelection(); p.term.clear(); return p.term.focus();
       case "find": return openFind();
       case "findNext": return findStep(1);
       case "findPrev": return findStep(-1);
-      case "newTab": return void newSession();
-      case "closeTab": return closeSession(s.id);
-      case "renameTab": return rename(s);
-      case "nextTab": return cycle(1);
-      case "prevTab": return cycle(-1);
-      case "selectTab": { const ids = ordered(); const pick = arg >= 8 ? ids[ids.length - 1] : ids[arg]; if (pick) switchTo(pick); return; }
+      case "newTab": return void newTab();
+      case "closeTab": return closePane(p.id);           // ⌘W: the pane; the tab when it's the last
+      case "closeWholeTab": return closeTab(p.tabId);
+      case "renameTab": return rename(tabById(p.tabId));
+      case "nextTab": return cycleTab(1);
+      case "prevTab": return cycleTab(-1);
+      case "selectTab": { const pick = arg >= 8 ? tabs[tabs.length - 1] : tabs[arg]; if (pick) switchTab(pick.id); return; }
+      case "splitRight": return splitPane("row");
+      case "splitDown": return splitPane("col");
+      case "focusNextPane": return cyclePane(1);
+      case "focusPrevPane": return cyclePane(-1);
       case "zoomIn": return setFont(fontSize + 1);
       case "zoomOut": return setFont(fontSize - 1);
       case "zoomReset": return setFont(CFG.fontSize);
@@ -335,7 +498,7 @@ export function boot({ kit, BASE, CFG, xt }) {
 
   // xterm asks this for every key event; false = xterm ignores it. We act on keydown only
   // but swallow every phase of a chord we own, so no stray keypress reaches the shell.
-  function handleKey(s, e) {
+  function handleKey(p, e) {
     if (e.isComposing) return true;
     const hit = keyAction(e, IS_MAC);
     if (!hit) return true;
@@ -345,15 +508,15 @@ export function boot({ kit, BASE, CFG, xt }) {
     }
     // ⌘C with nothing selected isn't a copy — on mac ⌘ never reaches the shell anyway, but
     // off-mac Ctrl+Shift+C with no selection should also do nothing rather than send ^C.
-    if (hit.action === "copy" && !s.term.hasSelection()) return false;
+    if (hit.action === "copy" && !p.term.hasSelection()) return false;
     // Native paste on mac: let the browser fire its paste event into xterm's textarea
     // (works without clipboard-read permission, and keeps bracketed paste intact).
     if (hit.action === "paste" && IS_MAC) return false;
-    if (e.type === "keydown") { e.preventDefault(); run(s, hit.action, hit.arg); }
+    if (e.type === "keydown") { e.preventDefault(); run(p, hit.action, hit.arg); }
     return false;
   }
 
-  // ── find bar ──────────────────────────────────────────────────────────────────
+  // ── find bar (searches the active pane) ───────────────────────────────────────
   const DECOR = () => ({
     matchBackground: theme.selectionInactiveBackground, matchBorder: theme.brightBlack,
     matchOverviewRuler: theme.yellow, activeMatchBackground: theme.selectionBackground,
@@ -361,9 +524,9 @@ export function boot({ kit, BASE, CFG, xt }) {
   });
   const findOpts = () => ({ caseSensitive: $("findCase").classList.contains("on"), regex: $("findRe").classList.contains("on"), decorations: DECOR(), incremental: false });
   function openFind() {
-    const s = sessions.get(activeId); if (!s || !s.search) return;
+    const p = activePane(); if (!p || !p.search) return;
     $("find").hidden = false;
-    const sel = s.term.hasSelection() ? s.term.getSelection() : "";
+    const sel = p.term.hasSelection() ? p.term.getSelection() : "";
     if (sel && !sel.includes("\n")) $("findq").value = sel;
     $("findq").focus(); $("findq").select();
     if ($("findq").value) findStep(1);
@@ -371,23 +534,23 @@ export function boot({ kit, BASE, CFG, xt }) {
   function closeFind() {
     if ($("find").hidden) return;
     $("find").hidden = true;
-    for (const s of sessions.values()) { try { s.search && s.search.clearDecorations(); } catch (e) {} }
-    const s = sessions.get(activeId); if (s) s.term.focus();
+    for (const p of panes.values()) { try { p.search && p.search.clearDecorations(); } catch (e) {} }
+    const p = activePane(); if (p) p.term.focus();
   }
   function findStep(dir) {
-    const s = sessions.get(activeId); const q = $("findq").value;
-    if (!s || !s.search) return;
-    if (!q) { s.search.clearDecorations(); $("findn").textContent = ""; return; }
+    const p = activePane(); const q = $("findq").value;
+    if (!p || !p.search) return;
+    if (!q) { p.search.clearDecorations(); $("findn").textContent = ""; return; }
     let found = false;
-    try { found = dir < 0 ? s.search.findPrevious(q, findOpts()) : s.search.findNext(q, findOpts()); } catch (e) { found = false; }
+    try { found = dir < 0 ? p.search.findPrevious(q, findOpts()) : p.search.findNext(q, findOpts()); } catch (e) { found = false; }
     $("find").classList.toggle("miss", !found);
   }
   $("findq").addEventListener("input", () => {
-    const s = sessions.get(activeId); const q = $("findq").value;
-    if (!s || !s.search) return;
-    if (!q) { s.search.clearDecorations(); $("findn").textContent = ""; $("find").classList.remove("miss"); return; }
+    const p = activePane(); const q = $("findq").value;
+    if (!p || !p.search) return;
+    if (!q) { p.search.clearDecorations(); $("findn").textContent = ""; $("find").classList.remove("miss"); return; }
     let found = false;
-    try { found = s.search.findNext(q, { ...findOpts(), incremental: true }); } catch (e) {}
+    try { found = p.search.findNext(q, { ...findOpts(), incremental: true }); } catch (e) {}
     $("find").classList.toggle("miss", !found);
   });
   $("findq").addEventListener("keydown", (e) => {
@@ -404,78 +567,54 @@ export function boot({ kit, BASE, CFG, xt }) {
     $(id).onclick = () => { $(id).classList.toggle("on"); $(id).setAttribute("aria-pressed", $(id).classList.contains("on")); findStep(1); };
   }
 
-  // Result counts: the addon reports them once decorations are on.
-  function watchResults(s) {
-    if (!s.search || !s.search.onDidChangeResults) return;
-    s.search.onDidChangeResults(({ resultIndex, resultCount }) => {
-      if (s.id !== activeId) return;
-      $("findn").textContent = resultCount ? (resultIndex >= 0 ? resultIndex + 1 : "?") + "/" + resultCount + (resultCount >= 1000 ? "+" : "") : "0";
-    });
-  }
-
   // ── context menu (rendered by the console, ADR 0036) ──────────────────────────
   let menuFor = null;
-  function openMenu(s, e) {
-    if (s.id !== activeId) switchTo(s.id);
-    menuFor = s;
-    const k = IS_MAC ? { c: "⌘C", v: "⌘V", a: "⌘A", k: "⌘K", f: "⌘F", t: "⌘T", w: "⌘W" }
-                     : { c: "Ctrl+Shift+C", v: "Ctrl+Shift+V", a: "Ctrl+Shift+A", k: "", f: "Ctrl+Shift+F", t: "Ctrl+Shift+T", w: "Ctrl+Shift+W" };
+  function openMenu(p, e) {
+    if (!isActive(p)) focusPane(p.id);
+    menuFor = p;
+    const t = tabById(p.tabId);
+    const multi = !!t && panesOf(t.root).length > 1;
+    const k = IS_MAC ? { c: "⌘C", v: "⌘V", a: "⌘A", k: "⌘K", f: "⌘F", t: "⌘T", w: "⌘W", r: "⌘D", d: "⌘⇧D" }
+                     : { c: "Ctrl+Shift+C", v: "Ctrl+Shift+V", a: "Ctrl+Shift+A", k: "", f: "Ctrl+Shift+F", t: "Ctrl+Shift+T", w: "Ctrl+Shift+W", r: "Ctrl+Shift+E", d: "Ctrl+Shift+O" };
+    const sc = (label, key) => label + (key ? "  " + key : "");
     const items = [
-      { id: "copy", label: "Copy" + (k.c ? "  " + k.c : ""), disabled: !s.term.hasSelection() },
-      { id: "paste", label: "Paste  " + k.v },
-      { id: "selectAll", label: "Select all  " + k.a },
+      { id: "copy", label: sc("Copy", k.c), disabled: !p.term.hasSelection() },
+      { id: "paste", label: sc("Paste", k.v) },
+      { id: "selectAll", label: sc("Select all", k.a) },
       { divider: true },
-      { id: "find", label: "Find…  " + k.f, disabled: !s.search },
-      { id: "clear", label: "Clear" + (k.k ? "  " + k.k : "") },
+      { id: "find", label: sc("Find…", k.f), disabled: !p.search },
+      { id: "clear", label: sc("Clear", k.k) },
       { divider: true },
-      { id: "newTab", label: "New tab  " + k.t },
+      { id: "splitRight", label: sc("Split right", k.r) },
+      { id: "splitDown", label: sc("Split down", k.d) },
+      ...(multi ? [{ id: "closeTab", label: sc("Close pane", k.w), danger: true }] : []),
+      { divider: true },
+      { id: "newTab", label: sc("New tab", k.t) },
       { id: "renameTab", label: "Rename tab" },
-      { id: "closeTab", label: "Close tab  " + k.w, danger: true },
+      { id: multi ? "closeWholeTab" : "closeTab", label: multi ? "Close tab" : sc("Close tab", k.w), danger: true },
     ];
-    if (inFrame) post({ type: "protoagent:contextmenu:open", x: e.clientX, y: e.clientY, items });
+    post({ type: "protoagent:contextmenu:open", x: e.clientX, y: e.clientY, items });
+  }
+
+  // ── bus + host messages ───────────────────────────────────────────────────────
+  // Adopt a server-side session as a tab (once). `focus` brings it to the front.
+  function adopt({ session, name, focus }) {
+    if (!session) return;
+    for (const p of panes.values()) {
+      if (p.sessionId === session) { if (focus) focusPane(p.id); return; }
+    }
+    newTab({ name: name || undefined, customName: name || null, layout: leaf(session), focus: !!focus || !tabs.length });
   }
   window.addEventListener("message", (e) => {
     const m = e.data || {};
     if (m.type === "protoagent:contextmenu:action" && menuFor) {
-      const s = sessions.get(menuFor.id) || sessions.get(activeId);
-      if (s) run(s, String(m.itemId || "").split(".").pop());
+      const p = panes.get(menuFor.id) || activePane();
+      if (p) run(p, String(m.itemId || "").split(".").pop());
+    } else if (m.type === "protoagent:event" && m.topic === "terminal.session_opened" && m.data) {
+      adopt(m.data);
     }
   });
-
-  // ── wiring ────────────────────────────────────────────────────────────────────
-  $("newtab").onclick = () => newSession();
-  new ResizeObserver(() => { const s = sessions.get(activeId); if (s) fit(s); }).observe($("terms"));
-  setInterval(() => { for (const s of sessions.values()) send(s, { type: "ping" }); }, 30000);
-  // A view coming back from the background: refit + refocus the visible terminal.
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") {
-      const s = sessions.get(activeId); if (s) { fit(s); s.term.focus(); }
-      if (booted) adoptPending();   // belt-and-braces for a session_opened event we missed
-    }
-  });
-  window.addEventListener("focus", () => { const s = sessions.get(activeId); if (s && $("find").hidden) s.term.focus(); });
-
-  // Stay mounted while another console view is showing (bridge `background: true`) —
-  // otherwise the console unmounts this iframe and every terminal drops.
-  // Also hear this plugin's own bus topics — terminal.session_opened is how a tab the
-  // agent opened (terminal_run / terminal_open) appears here without a reload.
-  const stayMounted = () => post({ type: "protoagent:subscribe", patterns: ["terminal.#"], background: true });
-
-  // Adopt a server-side session as a tab (once). `focus` brings it to the front.
-  function adopt({ session, name, focus }) {
-    if (!session) return;
-    for (const s of sessions.values()) {
-      if (s.sessionId === session) { if (focus) switchTo(s.id); return; }
-    }
-    const s = newSession({ session, customName: name || null, name: name || undefined });
-    if (focus || sessions.size === 1) switchTo(s.id); else renderTabs();
-    save();
-  }
-  window.addEventListener("message", (e) => {
-    const m = e.data || {};
-    if (m.type === "protoagent:event" && m.topic === "terminal.session_opened" && m.data) adopt(m.data);
-  });
-  // Tabs opened while no view was loaded: ask the (gated) session list once on boot.
+  // Tabs opened while no view was loaded (or an event we missed): the gated session list.
   async function adoptPending() {
     if (!kit.apiFetch) return;
     try {
@@ -486,25 +625,38 @@ export function boot({ kit, BASE, CFG, xt }) {
     } catch (e) { /* offline / no host — nothing to adopt */ }
   }
 
-  // Boot once: restore the saved tabs (reattaching their shells) or open a fresh one.
-  let booted = false;
+  // Stay mounted while another console view is showing (bridge `background: true`) —
+  // otherwise the console unmounts this iframe and every terminal drops. Also hear this
+  // plugin's bus topics (terminal.session_opened: a tab the agent opened).
+  const stayMounted = () => post({ type: "protoagent:subscribe", patterns: ["terminal.#"], background: true });
+
+  // ── wiring ────────────────────────────────────────────────────────────────────
+  $("newtab").onclick = () => newTab();
+  new ResizeObserver(() => fitTab(activeTab())).observe($("terms"));
+  setInterval(() => { for (const p of panes.values()) send(p, { type: "ping" }); }, 30000);
+  // A view coming back from the background: refit + refocus the visible terminal.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    fitTab(activeTab()); const p = activePane(); if (p) p.term.focus();
+    if (booted) adoptPending();   // belt-and-braces for a session_opened event we missed
+  });
+  window.addEventListener("focus", () => { const p = activePane(); if (p && $("find").hidden) p.term.focus(); });
+
+  // Boot once: restore the saved tabs + layouts (reattaching their shells) or open a fresh one.
   async function start() {
     if (booted) return; booted = true;
     applyTheme(); stayMounted();
     const saved = load();
-    if (saved && Array.isArray(saved.tabs) && saved.tabs.length) {
-      for (const t of saved.tabs) newSession(t);
-      const ids = ordered();
-      switchTo(ids[saved.active] || ids[0]);
-    }
+    for (const s of saved) newTab({ ...s, focus: false });
+    if (tabs.length) switchTab((tabs[saved.active] || tabs[0]).id);
     await adoptPending();
-    if (!sessions.size) newSession();
+    if (!tabs.length) newTab();
   }
   kit.initPluginView(() => {
     applyTheme(); stayMounted(); start();
     // The handshake can land after the boot fallback already tried with no bearer — retry
-    // any tab that was turned away now that a token is here.
-    for (const s of sessions.values()) if (s.status === "unauthorized") { s.retry = 0; connect(s); }
+    // any pane that was turned away now that a token is here.
+    for (const p of panes.values()) if (p.status === "unauthorized") { p.retry = 0; connect(p); }
     if (booted) adoptPending();   // the first try may have run before the bearer arrived
   });
   setTimeout(start, 1000);

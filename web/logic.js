@@ -42,6 +42,14 @@ const MAC_KEYS = {
   "mod+shift++": "zoomIn",
   "mod+-": "zoomOut",
   "mod+0": "zoomReset",
+  "mod+d": "splitRight",
+  "mod+shift+d": "splitDown",
+  "mod+]": "focusNextPane",
+  "mod+[": "focusPrevPane",
+  "mod+alt+arrowright": "focusNextPane",
+  "mod+alt+arrowdown": "focusNextPane",
+  "mod+alt+arrowleft": "focusPrevPane",
+  "mod+alt+arrowup": "focusPrevPane",
 };
 const OTHER_KEYS = {
   "mod+shift+c": "copy",
@@ -57,6 +65,13 @@ const OTHER_KEYS = {
   "mod++": "zoomIn",
   "mod+-": "zoomOut",
   "mod+0": "zoomReset",
+  // Terminator's convention: E splits side by side, O stacks.
+  "mod+shift+e": "splitRight",
+  "mod+shift+o": "splitDown",
+  "mod+alt+arrowright": "focusNextPane",
+  "mod+alt+arrowdown": "focusNextPane",
+  "mod+alt+arrowleft": "focusPrevPane",
+  "mod+alt+arrowup": "focusPrevPane",
 };
 const SHARED_KEYS = { "ctrl+tab": "nextTab", "ctrl+shift+tab": "prevTab" };
 

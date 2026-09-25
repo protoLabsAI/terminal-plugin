@@ -11,9 +11,11 @@ Install into any protoAgent agent from this git URL — it's not tied to one age
 
 - A left-rail **Terminal** view (ADR 0026) — an xterm.js page (fit + clickable-links
   addons) served by the plugin, connected to a shell over a WebSocket.
-- **Tabs** — run several sessions in one view (+ to add, × to close, double-click to
-  rename inline). Each tab is attached to its own PTY shell; closing a tab ends only
-  that shell.
+- **Tabs and split panes** — several tabs in one view (+ to add, × to close,
+  double-click to rename inline), and any tab can be split side by side or stacked, as
+  deep as you like (⌘D / ⌘⇧D). Each pane is its own shell; a split opens in the same
+  directory as the pane it came from. Drag a divider to resize; the layout is
+  remembered across reloads, with every pane reattached to its shell.
 - **Shells that survive** — a shell outlives the connection that opened it. Switching
   to another console view keeps the terminal mounted in the background; a reload, a
   network blip or a server-side reconnect reattaches each tab to its shell and
@@ -72,10 +74,13 @@ model gateway, like any other tool result.
 | Select all | ⌘A | Ctrl+Shift+A |
 | Find (Enter / Shift+Enter: next / previous) | ⌘F, then ⌘G / ⌘⇧G | Ctrl+Shift+F, then Ctrl+Shift+G |
 | Clear | ⌘K | right-click ▸ Clear (Ctrl+L in the shell) |
-| New tab / close tab | ⌘T / ⌘W | Ctrl+Shift+T / Ctrl+Shift+W |
+| New tab | ⌘T | Ctrl+Shift+T |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab, ⌘⇧] / ⌘⇧[ | Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PgDn / Ctrl+PgUp |
 | Go to tab 1–9 | ⌘1 … ⌘9 (⌘9 = last) | Ctrl+1 … Ctrl+9 |
 | Font size bigger / smaller / reset | ⌘= / ⌘- / ⌘0 | Ctrl+= / Ctrl+- / Ctrl+0 |
+| Split right / split down | ⌘D / ⌘⇧D | Ctrl+Shift+E / Ctrl+Shift+O |
+| Next / previous pane | ⌘] / ⌘[, ⌘⌥ arrows | Ctrl+Alt arrows |
+| Close pane (the tab, if it's the last) | ⌘W | Ctrl+Shift+W |
 
 Everything else goes to the shell, except console shortcuts: on macOS any other ⌘ chord
 (⌘⇧K palette, ⌘, Settings…); elsewhere Ctrl+Shift chords and Ctrl+, — plain Ctrl+<key>
@@ -127,7 +132,7 @@ runtime-status without a console rebuild (#853). No restart.
 Or from the CLI against a running server:
 
 ```bash
-python -m server plugin install https://github.com/protoLabsAI/terminal-plugin --ref v0.7.0
+python -m server plugin install https://github.com/protoLabsAI/terminal-plugin --ref v0.8.0
 # then pick it up live: hit "Sync" in the console Plugins panel, or have the agent call
 # reload_plugins (plugin-devkit). It hot-mounts — no restart.
 ```
@@ -169,12 +174,13 @@ Then open the **Terminal** rail icon. (Make sure the host has an operator bearer
 | `view.py` | the page shell — markup, styles, and the bootstrap that loads the kit, xterm and the app |
 | `web/terminal.js` | the view app — tabs, sessions/reconnect, keys, find, context menu, theme |
 | `web/logic.js` | pure view logic (key map, token → ANSI palette, labels) — `node --test tests/js/*.test.mjs` |
+| `web/layout.js` | pure split-pane layout trees (split, close + collapse, resize, persist) |
 | `vendor/` | the vendored xterm.js 5.5 + addons + css (served offline; versions in `vendor/VERSIONS.md`) |
 | `__init__.py` | `register()` — mounts the router (on live config) + a shutdown hook that ends every shell |
 
 ## Roadmap
 
-Next: split panes, and validating the experimental Windows backend. PRs welcome.
+Next: validating the experimental Windows backend. PRs welcome.
 
 Enabled by default once installed (the WS bearer gate is the protection) — disable
 with `plugins.disabled: [terminal]`.

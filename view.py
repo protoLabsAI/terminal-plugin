@@ -7,8 +7,9 @@ channel (the operator bearer rides its FIRST frame, never the URL) · slug-aware
 This module is only the page SHELL — markup, styles, and a bootstrap that loads the DS
 kit, the VENDORED xterm bundles (offline, no CDN) and then the app. The app itself is
 plain ES modules under ``web/`` (served from ``/plugins/terminal/static/``):
-``web/terminal.js`` (sessions, tabs, keys, find, menu, theme) and ``web/logic.js``
-(pure logic, unit-tested under ``node --test``). No build step.
+``web/terminal.js`` (tabs, split panes, sessions, keys, find, menu, theme), plus the
+pure, ``node --test``-tested ``web/logic.js`` (keys, theme, labels) and ``web/layout.js``
+(split-pane trees). No build step.
 
 ``PAGE`` is a template: api.render_page fills ``__TERMINAL_CONFIG__`` with the
 client-side config on every load, so a Settings change applies on the next view load.
@@ -61,11 +62,29 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--pl-color-fg-muted,#9a9aa5);margin-right:6px}
   .dot.ok{background:var(--pl-color-status-success,#4ade80)} .dot.bad{background:var(--pl-color-status-error,#f87171)}
   #terms{position:relative;flex:1 1 auto;min-height:0}
-  .termpane{position:absolute;inset:0;padding:6px 8px;background:var(--pl-color-bg,#0a0a0c);display:none}
-  .termpane.active{display:block}
+  /* one body per tab; its layout tree renders as nested flex rows/cols of panes */
+  .tabbody{position:absolute;inset:0;display:none;background:var(--pl-color-bg,#0a0a0c)}
+  .tabbody.active{display:flex}
+  .split{display:flex;min-width:0;min-height:0}
+  .split.row{flex-direction:row} .split.col{flex-direction:column}
+  .pane{position:relative;min-width:0;min-height:0;background:var(--pl-color-bg,#0a0a0c)}
+  .pane .xhost{position:absolute;inset:6px 8px}
+  .tabbody.multi .pane .xhost{inset:4px 6px}
+  .tabbody.multi .pane:not(.active){opacity:.62}
+  .tabbody.multi .pane:not(.active):hover{opacity:.8}
+  .divider{flex:0 0 5px;background:var(--pl-color-border,#26262b);position:relative;z-index:2}
+  .split.row>.divider{cursor:col-resize;margin:0 -2px;border-left:2px solid var(--pl-color-bg,#0a0a0c);border-right:2px solid var(--pl-color-bg,#0a0a0c)}
+  .split.col>.divider{cursor:row-resize;margin:-2px 0;border-top:2px solid var(--pl-color-bg,#0a0a0c);border-bottom:2px solid var(--pl-color-bg,#0a0a0c)}
+  .divider:hover{background:var(--pl-color-accent,#9b87f2)}
+  .drag-shield{position:fixed;inset:0;z-index:50} .drag-shield.row{cursor:col-resize} .drag-shield.col{cursor:row-resize}
+  /* new panes are opened here (laid out, invisible) so xterm can measure before placement */
+  #staging{position:absolute;inset:0;visibility:hidden;pointer-events:none;overflow:hidden}
+  #staging>.pane{position:absolute;inset:0}
+  .tab .npanes{font-size:10px;line-height:1;padding:1px 4px;border-radius:8px;color:var(--pl-color-fg-muted,#9a9aa5);
+    border:1px solid var(--pl-color-border,#26262b)}
   #err{padding:12px;color:var(--pl-color-status-error,#f87171)}
   /* find bar — floats over the top-right of the active terminal */
-  #find{position:absolute;top:6px;right:14px;z-index:5;display:flex;align-items:center;gap:4px;padding:4px;
+  #find{position:absolute;top:6px;right:14px;z-index:6;display:flex;align-items:center;gap:4px;padding:4px;
     background:var(--pl-color-bg-raised,#1a1a1f);border:1px solid var(--pl-color-border-strong,#3a3a42);
     border-radius:var(--pl-radius,6px);box-shadow:0 4px 16px rgba(0,0,0,.35)}
   #find[hidden]{display:none}
@@ -88,6 +107,7 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     <span class="stat"><span class="dot" id="dot"></span><span id="status">connecting…</span></span>
   </div>
   <div id="terms">
+    <div id="staging" aria-hidden="true"></div>
     <div id="find" hidden role="search">
       <input id="findq" type="text" placeholder="Find" aria-label="Find in terminal" spellcheck="false" autocomplete="off">
       <span id="findn"></span>

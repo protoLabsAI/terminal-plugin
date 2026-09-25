@@ -268,6 +268,20 @@ def test_a_dropped_socket_detaches_and_reattach_replays(client, _fresh_manager):
         _read_until(ws, "after_reattach")  # and it is the same live shell
 
 
+def test_a_split_starts_in_the_source_panes_cwd(client, tmp_path):
+    import os
+
+    c = client({"shell": "/bin/sh", "login_shell": False})
+    with c.websocket_connect("/plugins/terminal/ws") as a:
+        src = _auth(a)["session"]
+        a.send_json({"type": "input", "data": f"cd {tmp_path} && echo moved_ok\n"})
+        _read_until(a, "moved_ok\r")
+        with c.websocket_connect("/plugins/terminal/ws") as b:
+            b.send_json({"type": "auth", "token": "", "cwd_from": src})
+            m = b.receive_json()
+            assert m["type"] == "connected" and os.path.realpath(m["cwd"]) == os.path.realpath(str(tmp_path))
+
+
 def test_an_unknown_session_gets_a_fresh_shell(client):
     c = client({"shell": "/bin/cat"})
     with c.websocket_connect("/plugins/terminal/ws") as ws:
