@@ -11,7 +11,7 @@ description: >-
   always loopback-local. (Disable it explicitly if you don't want a terminal.)
 enabled: true
 repository: https://github.com/protoLabsAI/terminal-plugin
-min_protoagent_version: "0.82.0"   # views (ADR 0026) + WS-through-proxy (#883) + live_config + background mount (#1640)
+min_protoagent_version: "0.148.0"  # views, WS-through-proxy (#883), live_config, background mount (#1640), keydown forwarding (0.117), plugin context menus (#3030, 0.148)
 
 # Linux/macOS use the stdlib PTY (no deps). Windows needs pywinpty (validated in CI on a
 # real cmd.exe) — declared, NOT auto-installed (install-deps it on Windows).

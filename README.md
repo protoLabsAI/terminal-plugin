@@ -115,8 +115,9 @@ A terminal is **interactive shell access on the host**. This plugin:
 
 ## Requirements
 
-- **protoAgent ≥ 0.82.0** (console views, WebSocket-through-the-fleet-proxy #883, live
-  config, and background-mounted views #1640).
+- **protoAgent ≥ 0.148.0** (console views, WebSocket-through-the-fleet-proxy #883, live
+  config, background-mounted views #1640, key forwarding, and plugin context menus
+  #3030). Older hosts keep v0.4.x.
 - **Linux/macOS** — stdlib PTY, no pip deps.
 - **Windows** — via `pywinpty` (`python -m server plugin install-deps terminal`),
   validated in CI on a real `cmd.exe` through the whole WebSocket bridge. POSIX-only
