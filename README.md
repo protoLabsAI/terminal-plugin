@@ -45,6 +45,25 @@ Install into any protoAgent agent from this git URL — it's not tied to one age
   palette keep working while the terminal has focus. Tabs follow the running program's
   title (shown as the cwd's tail) until you rename them.
 
+## The agent and your terminal
+
+The agent can work **with** your terminal, in plain sight — four tools, gated by the
+**Agent access** setting (`run` by default; `read` or `off` to restrict it):
+
+| Tool | What it does |
+|---|---|
+| `terminal_list` | the open tabs: cwd, what's running, which one you're looking at |
+| `terminal_read` | a tab's recent output as plain text — "what's this error in my terminal?" reads the tab you're looking at |
+| `terminal_run` | runs a command **visibly** in its own **Agent** tab (created on demand, reused), waits for the prompt to return, and hands back the output. Long-running commands (dev servers, watchers) keep running in the tab |
+| `terminal_open` | opens a tab for you — optionally in a directory, with a name — and brings the Terminal view up |
+
+Guardrails: `terminal_run` never types into a tab where a program holds the foreground
+(vim, a build, a REPL) — it would feed keystrokes into that program. It only uses one of
+*your* tabs when you ask it to (`session="active"` or an id), and it never switches your
+console view. The agent already has a hidden shell; this is the visible one — what it
+runs, you can watch, scroll back through, and take over. Whatever it reads goes to your
+model gateway, like any other tool result.
+
 ## Keyboard
 
 | | macOS | Linux / Windows |
@@ -108,7 +127,7 @@ runtime-status without a console rebuild (#853). No restart.
 Or from the CLI against a running server:
 
 ```bash
-python -m server plugin install https://github.com/protoLabsAI/terminal-plugin --ref v0.6.0
+python -m server plugin install https://github.com/protoLabsAI/terminal-plugin --ref v0.7.0
 # then pick it up live: hit "Sync" in the console Plugins panel, or have the agent call
 # reload_plugins (plugin-devkit). It hot-mounts — no restart.
 ```
@@ -129,6 +148,7 @@ terminal:
   cursor_style: block       # block | bar | underline
   option_as_meta: false     # macOS: Option sends Meta (Option+B/F word jumps)
   copy_on_select: false
+  agent_access: run         # off | read | run — see "The agent and your terminal"
 ```
 
 (Or edit them in **Settings ▸ Plugins ▸ Terminal**.)
@@ -142,7 +162,10 @@ Then open the **Terminal** rail icon. (Make sure the host has an operator bearer
 |---|---|
 | `pty_session.py` | the PTY shell session: POSIX (stdlib `pty`) + Windows (`pywinpty`, experimental) behind `open_session()` |
 | `sessions.py` | the session manager: shells that outlive their socket — replay buffer, attach/takeover, keep-alive reaper |
-| `api.py` | the router: the public `/view` page (config baked in), vendored `/static/*` assets, the bearer-gated `/ws` attach bridge |
+| `api.py` | the routers: the public `/view` page (config baked in), `/static/*` assets and the bearer-gated `/ws` attach bridge; the gated `/api/plugins/terminal/sessions` list |
+| `tools.py` | the agent tools (`terminal_list/read/run/open`), gated by `agent_access` |
+| `textutil.py` | raw terminal output → plain text (ANSI stripped, `\r` redraws collapsed) |
+| `procinfo.py` | a process's command name + cwd (Linux `/proc`, macOS `ps`/`lsof`) |
 | `view.py` | the page shell — markup, styles, and the bootstrap that loads the kit, xterm and the app |
 | `web/terminal.js` | the view app — tabs, sessions/reconnect, keys, find, context menu, theme |
 | `web/logic.js` | pure view logic (key map, token → ANSI palette, labels) — `node --test tests/js/*.test.mjs` |
@@ -151,9 +174,7 @@ Then open the **Terminal** rail icon. (Make sure the host has an operator bearer
 
 ## Roadmap
 
-Next: agent integration (the agent can open a terminal, run a command in one, and read
-what's on screen), split panes, and validating the experimental Windows backend.
-PRs welcome.
+Next: split panes, and validating the experimental Windows backend. PRs welcome.
 
 Enabled by default once installed (the WS bearer gate is the protection) — disable
 with `plugins.disabled: [terminal]`.

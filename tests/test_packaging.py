@@ -78,7 +78,7 @@ def test_view_page_persists_sessions():
 
     app = _app_js()
     # stays mounted while hidden (bridge background opt-in) so switching views keeps shells
-    assert 'type: "protoagent:subscribe", patterns: [], background: true' in app
+    assert 'type: "protoagent:subscribe", patterns: ["terminal.#"], background: true' in app
     # remembers tabs + their server session ids across reloads, and reattaches by id
     assert "localStorage" in app and "session: s.sessionId" in app
     # the tab's × ends the shell explicitly (a bare disconnect only detaches)

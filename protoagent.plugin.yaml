@@ -1,6 +1,6 @@
 id: terminal
 name: Terminal
-version: 0.6.0
+version: 0.7.0
 description: >-
   A full terminal in the protoAgent console — an xterm.js view wired to a real PTY
   shell over a WebSocket. The terminal is themed from the protoAgent design system
@@ -31,6 +31,7 @@ config:
   cursor_style: block       # block | bar | underline
   option_as_meta: false     # macOS: Option sends Meta (Alt+b/f word-jumps) instead of typing ∑/ƒ/…
   copy_on_select: false     # copy a selection to the clipboard as soon as it's made
+  agent_access: run         # off | read (list/read tabs) | run (+ run commands in, and open, tabs)
   # auth_token is NOT configured here — the WS verifies the connecting token against
   # the host's operator bearer (config auth.token / A2A_AUTH_TOKEN). When the host has
   # no bearer set (loopback dev), the WS is open on the bound interface — only enable
@@ -50,6 +51,7 @@ settings:
   - { key: cursor_style, label: "Cursor style", type: select, options: [block, bar, underline], description: "The cursor shape. Applies when the view next loads." }
   - { key: option_as_meta, label: "Option as Meta (macOS)", type: bool, description: "Option sends Meta, so Option+B/F jump words in the shell. Off: Option types special characters (∑, ƒ, #…). Applies when the view next loads." }
   - { key: copy_on_select, label: "Copy on select", type: bool, description: "Copy a selection to the clipboard as soon as you make it (X11/iTerm style)." }
+  - { key: agent_access, label: "Agent access", type: select, options: [run, read, "off"], description: "What the agent may do with your terminals. run: read them, and run commands visibly in its own Agent tab (or one you name), and open tabs for you. read: only list and read them (e.g. \"what's this error?\"). off: nothing. Terminal output you let it read goes to your model gateway. Applies immediately." }
 
 # Console view (ADR 0026) — a left-rail icon whose panel iframes the terminal page.
 # Served on the PUBLIC /plugins/<id> prefix (an iframe page-load can't carry a bearer);
@@ -65,6 +67,10 @@ views:
 # WS does its own bearer check.)
 public_paths:
   - "/plugins/terminal/static/"
+
+# Bus topics (ADR 0039). The view subscribes to terminal.# to add tabs the agent opens.
+emits:
+  - terminal.session_opened   # {session, name, focus} — a tool opened a terminal tab
 
 # Declarative transparency (surfaced in the console; not enforced).
 capabilities:

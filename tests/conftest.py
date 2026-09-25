@@ -28,9 +28,19 @@ class _Registry:
     def __init__(self):
         self.config = {}
         self.tools, self.routers, self.surfaces = [], [], []
+        self.emitted, self.navigations = [], []
 
     def register_tool(self, t):
         self.tools.append(t)
+
+    def register_tools(self, ts):
+        self.tools.extend(ts)
+
+    def emit(self, topic, data=None):
+        self.emitted.append((topic, data or {}))
+
+    def navigate(self, view=""):
+        self.navigations.append(view)
 
     def register_router(self, router, prefix=""):
         self.routers.append(prefix)

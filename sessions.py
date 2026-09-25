@@ -45,9 +45,26 @@ class SessionLimitError(Exception):
 class Session:
     """One live shell + its replay buffer + (at most) one attached viewer."""
 
-    def __init__(self, sid: str, pty, *, buffer_chars: int = DEFAULT_BUFFER_CHARS):
+    def __init__(
+        self,
+        sid: str,
+        pty,
+        *,
+        buffer_chars: int = DEFAULT_BUFFER_CHARS,
+        name: str = "",
+        origin: str = "operator",
+        pending_adopt: bool = False,
+    ):
         self.id = sid
         self.pty = pty
+        self.name = name  # a tab name the SERVER chose (agent tabs); "" = the view names it
+        self.origin = origin  # "operator" (a view's + / ⌘T) or "agent" (a tool opened it)
+        # Opened by a tool while no view held it: the next view to load (or the live one,
+        # via the session_opened event) should add a tab for it. Cleared on first attach.
+        self.pending_adopt = pending_adopt
+        self.focused_at = 0.0  # monotonic time a view last showed this tab (0 = never)
+        self.emitted = 0  # total chars ever emitted — a cursor for "output since X"
+        self.alt_screen = False  # a full-screen program (vim, less, htop) is up
         self.detached_at: float | None = time.monotonic()  # no viewer yet
         self.exit_code: int | None = None
         self.exited = False
@@ -58,7 +75,6 @@ class Session:
         self._viewer: asyncio.Queue | None = None
         self._pump: asyncio.Task | None = None
         self._redraw_pending = False
-        self.alt_screen = False  # a full-screen program (vim, less, htop) is up
 
     @property
     def shell(self) -> str:
@@ -105,6 +121,7 @@ class Session:
     def _emit(self, text: str) -> None:
         if not text:
             return
+        self.emitted += len(text)
         if "\x1b[?" in text:
             self.alt_screen = alt_screen_after(text, self.alt_screen)
         self._buffer.append(text)
@@ -127,6 +144,19 @@ class Session:
                 text = text[nl + 1 :]
         return text
 
+    def text_since(self, pos: int) -> tuple[str, bool]:
+        """Output emitted after cursor ``pos`` (an earlier ``emitted``), and whether all of
+        it is still buffered (False = the start scrolled out of the replay buffer)."""
+        want = max(0, self.emitted - pos)
+        text = "".join(self._buffer)
+        return (text[-want:] if want else ""), want <= len(text)
+
+    def busy(self) -> int | None:
+        """The foreground process group when a program other than the shell holds the
+        terminal (vim, a build, a REPL), else None. None too when it can't be told."""
+        fg = self.pty.foreground_pgid() if hasattr(self.pty, "foreground_pgid") else None
+        return fg if fg and self.pty.pid and fg != self.pty.pid else None
+
     def _send(self, msg: dict) -> None:
         if self._viewer is not None:
             self._viewer.put_nowait(msg)
@@ -139,6 +169,7 @@ class Session:
             self._viewer.put_nowait({"type": "detached", "reason": "attached elsewhere"})
         self._viewer = queue
         self.detached_at = None
+        self.pending_adopt = False
         # A reattaching viewer replays raw output, which can't faithfully rebuild a
         # full-screen app's screen (the alt-screen switch may be long gone from the
         # buffer). Ask the program to repaint on the viewer's first resize — only when a
@@ -146,7 +177,15 @@ class Session:
         # an extra SIGWINCH just makes zsh reprint its prompt (a stray "%" per reload).
         self._redraw_pending = resumed and self.alt_screen
         queue.put_nowait(
-            {"type": "connected", "session": self.id, "shell": self.shell, "cwd": self.cwd, "resumed": resumed}
+            {
+                "type": "connected",
+                "session": self.id,
+                "shell": self.shell,
+                "cwd": self.cwd,
+                "resumed": resumed,
+                "name": self.name,
+                "origin": self.origin,
+            }
         )
         backlog = self.replay()
         if backlog:
@@ -198,6 +237,20 @@ class SessionManager:
     def __len__(self) -> int:
         return len(self._sessions)
 
+    def list(self) -> list[Session]:
+        """Live sessions, oldest first."""
+        return [s for s in self._sessions.values() if not s.exited]
+
+    def active(self) -> Session | None:
+        """The tab the operator looked at most recently (a view reports focus)."""
+        live = [s for s in self.list() if s.focused_at]
+        return max(live, key=lambda s: s.focused_at) if live else None
+
+    def agent_session(self) -> Session | None:
+        """The agent's own reusable tab, if it's still open."""
+        mine = [s for s in self.list() if s.origin == "agent"]
+        return mine[-1] if mine else None
+
     def get(self, sid: str | None) -> Session | None:
         if not sid:
             return None
@@ -215,6 +268,9 @@ class SessionManager:
         login: bool = False,
         max_sessions: int = 0,
         buffer_chars: int = DEFAULT_BUFFER_CHARS,
+        name: str = "",
+        origin: str = "operator",
+        pending_adopt: bool = False,
     ) -> Session:
         """Spawn a shell and start its pump. Raises ``SessionLimitError`` past
         ``max_sessions`` (0 = unlimited) and whatever the PTY raises on spawn."""
@@ -223,7 +279,7 @@ class SessionManager:
         pty = open_session(shell=shell, cwd=cwd, cols=cols, rows=rows, scrub_env=scrub_env, login=login)
         pty.start()
         sid = secrets.token_urlsafe(12)
-        sess = Session(sid, pty, buffer_chars=buffer_chars)
+        sess = Session(sid, pty, buffer_chars=buffer_chars, name=name, origin=origin, pending_adopt=pending_adopt)
         self._sessions[sid] = sess
         sess.start_pump(self._forget)
         return sess

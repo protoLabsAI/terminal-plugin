@@ -4,8 +4,10 @@
 view page (an iframe page-load can't carry a bearer, so the page must be public) and
 the WebSocket, which verifies the operator bearer itself from the socket's first
 ``auth`` frame (a browser WS can't set an Authorization header, and a ``?token=`` would
-leak into access logs). No tools — it's a view + a
-PTY bridge, plus a stop-only surface that kills the (now socket-independent) shells on
+leak into access logs). Plus a gated
+``/api/plugins/terminal`` router (the session list a view adopts agent-opened tabs
+from), four agent tools (tools.py — list / read / run / open, gated by ``agent_access``),
+and a stop-only surface that kills the (now socket-independent) shells on
 server shutdown. Enabled by default — the WS bearer gate is the protection, and an un-gated
 shell is only ever loopback-local (protoAgent requires a token to bind non-loopback).
 """
@@ -28,6 +30,20 @@ def register(registry) -> None:
         registry.register_router(build_router(live), prefix="/plugins/terminal")
     except Exception:  # noqa: BLE001 — the router is best-effort
         log.exception("[terminal] mounting the terminal router failed")
+    try:
+        from .api import build_api_router
+
+        registry.register_router(build_api_router(), prefix="/api/plugins/terminal")
+    except Exception:  # noqa: BLE001
+        log.exception("[terminal] mounting the terminal API router failed")
+    # Agent tools (tools.py) — gated live by the agent_access setting.
+    try:
+        from .api import resolve
+        from .tools import build_tools
+
+        registry.register_tools(build_tools(registry, lambda: resolve(live())))
+    except Exception:  # noqa: BLE001
+        log.exception("[terminal] registering the agent tools failed")
     # Shells outlive their sockets now (sessions.py), so the server's shutdown must
     # take them down — a surface with only a stop hook does exactly that.
     try:

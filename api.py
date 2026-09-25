@@ -29,6 +29,7 @@ import hmac
 import json
 import logging
 import os
+import time
 from pathlib import Path
 
 from fastapi import WebSocket  # module-level so the websocket route's annotation resolves
@@ -53,7 +54,9 @@ DEFAULTS = {
     "cursor_style": "block",
     "option_as_meta": False,
     "copy_on_select": False,
+    "agent_access": "run",
 }
+AGENT_ACCESS = ("off", "read", "run")
 CURSOR_STYLES = ("block", "bar", "underline")
 
 # Static files served locally (offline — no CDN), WHITELISTED by name → (dir, media type):
@@ -127,6 +130,7 @@ def resolve(cfg: dict | None) -> dict:
         "cursor_style": raw["cursor_style"] if raw["cursor_style"] in CURSOR_STYLES else DEFAULTS["cursor_style"],
         "option_as_meta": _bool(raw["option_as_meta"]),
         "copy_on_select": _bool(raw["copy_on_select"]),
+        "agent_access": raw["agent_access"] if raw["agent_access"] in AGENT_ACCESS else DEFAULTS["agent_access"],
     }
 
 
@@ -199,6 +203,31 @@ def build_router(cfg):
     return router
 
 
+def build_api_router():
+    """The GATED router (mounted under /api/plugins/terminal — the host's bearer applies).
+    A view that loads after a tool opened a tab uses it to adopt that tab."""
+    from fastapi import APIRouter
+
+    router = APIRouter()
+
+    @router.get("/sessions")
+    async def _sessions():
+        return {
+            "sessions": [
+                {
+                    "id": s.id,
+                    "name": s.name,
+                    "origin": s.origin,
+                    "pending_adopt": s.pending_adopt,
+                    "attached": s.attached,
+                }
+                for s in MANAGER.list()
+            ]
+        }
+
+    return router
+
+
 async def _receive_auth(ws) -> dict | None:
     """The socket's first frame, if it is a well-formed auth frame in time."""
     try:
@@ -255,6 +284,9 @@ async def _bridge(ws, hello: dict, conf) -> None:
                 sess.resize(_num(msg.get("cols"), 80, 1, 1000), _num(msg.get("rows"), 24, 1, 1000))
             elif kind == "ping":
                 queue.put_nowait({"type": "pong"})
+            elif kind == "focus":
+                # The view is showing this tab — "active" for the agent's terminal_read.
+                sess.focused_at = time.monotonic()
             elif kind == "close":
                 killed = True
                 break

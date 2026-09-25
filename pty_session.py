@@ -164,6 +164,16 @@ class PtySession:
         except OSError:
             pass
 
+    def foreground_pgid(self) -> int | None:
+        """The terminal's foreground process group — the shell's own pid while it sits at
+        a prompt, a job's group while a program runs. None when unknown."""
+        if self._fd is None:
+            return None
+        try:
+            return os.tcgetpgrp(self._fd)
+        except OSError:
+            return None
+
     def poll(self) -> int | None:
         """The child's exit code if it has exited (reaped non-blocking), else None."""
         if self.pid is None:

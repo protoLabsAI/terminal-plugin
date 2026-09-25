@@ -151,6 +151,7 @@ export function boot({ kit, BASE, CFG, xt }) {
     save();
     const s = sessions.get(id);
     if (s) {
+      send(s, { type: "focus" });   // "active" for the agent's terminal_read
       closeFind();
       fit(s); s.term.focus();
       setMeta(s.meta); setStatus(s.status || "…", s.statusCls);
@@ -181,7 +182,11 @@ export function boot({ kit, BASE, CFG, xt }) {
         const lost = s.sessionId && !m.resumed;   // we asked for a shell that is gone
         if (m.resumed || lost) s.term.reset();   // a resume's replay repaints from scratch
         if (lost) s.term.write(dim("[the previous shell ended — this is a new one]"));
-        s.sessionId = m.session; s.retry = 0; s.exited = false; save();
+        s.sessionId = m.session; s.retry = 0; s.exited = false;
+        if (m.name && !s.customName) s.customName = m.name;   // a tab the agent named ("Agent")
+        s.origin = m.origin || s.origin;
+        save();
+        if (s.id === activeId) send(s, { type: "focus" });
         s.meta = (m.shell || "") + "  " + (m.cwd || "");
         if (s.id === activeId) setMeta(s.meta);
         setS(s, m.resumed ? "reattached" : "connected", "ok"); refreshTab(s);
@@ -244,7 +249,7 @@ export function boot({ kit, BASE, CFG, xt }) {
     attachRenderer(term);
 
     const s = { id, name: (saved && saved.name) || "Terminal " + counter, customName: (saved && saved.customName) || null,
-                title: "", sessionId: (saved && saved.session) || null, term, fit: fitA, search, ws: null, el,
+                title: "", sessionId: (saved && saved.session) || null, origin: "operator", term, fit: fitA, search, ws: null, el,
                 status: "connecting…", statusCls: "", exited: false, detached: false, closing: false,
                 retry: 0, retryTimer: 0, fatal: "", meta: "", sentCols: 0, sentRows: 0 };
 
@@ -443,17 +448,47 @@ export function boot({ kit, BASE, CFG, xt }) {
   setInterval(() => { for (const s of sessions.values()) send(s, { type: "ping" }); }, 30000);
   // A view coming back from the background: refit + refocus the visible terminal.
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") { const s = sessions.get(activeId); if (s) { fit(s); s.term.focus(); } }
+    if (document.visibilityState === "visible") {
+      const s = sessions.get(activeId); if (s) { fit(s); s.term.focus(); }
+      if (booted) adoptPending();   // belt-and-braces for a session_opened event we missed
+    }
   });
   window.addEventListener("focus", () => { const s = sessions.get(activeId); if (s && $("find").hidden) s.term.focus(); });
 
   // Stay mounted while another console view is showing (bridge `background: true`) —
   // otherwise the console unmounts this iframe and every terminal drops.
-  const stayMounted = () => post({ type: "protoagent:subscribe", patterns: [], background: true });
+  // Also hear this plugin's own bus topics — terminal.session_opened is how a tab the
+  // agent opened (terminal_run / terminal_open) appears here without a reload.
+  const stayMounted = () => post({ type: "protoagent:subscribe", patterns: ["terminal.#"], background: true });
+
+  // Adopt a server-side session as a tab (once). `focus` brings it to the front.
+  function adopt({ session, name, focus }) {
+    if (!session) return;
+    for (const s of sessions.values()) {
+      if (s.sessionId === session) { if (focus) switchTo(s.id); return; }
+    }
+    const s = newSession({ session, customName: name || null, name: name || undefined });
+    if (focus || sessions.size === 1) switchTo(s.id); else renderTabs();
+    save();
+  }
+  window.addEventListener("message", (e) => {
+    const m = e.data || {};
+    if (m.type === "protoagent:event" && m.topic === "terminal.session_opened" && m.data) adopt(m.data);
+  });
+  // Tabs opened while no view was loaded: ask the (gated) session list once on boot.
+  async function adoptPending() {
+    if (!kit.apiFetch) return;
+    try {
+      const r = await kit.apiFetch("/api/plugins/terminal/sessions");
+      if (!r.ok) return;
+      const { sessions: list } = await r.json();
+      for (const x of list || []) if (x.pending_adopt) adopt({ session: x.id, name: x.name, focus: false });
+    } catch (e) { /* offline / no host — nothing to adopt */ }
+  }
 
   // Boot once: restore the saved tabs (reattaching their shells) or open a fresh one.
   let booted = false;
-  function start() {
+  async function start() {
     if (booted) return; booted = true;
     applyTheme(); stayMounted();
     const saved = load();
@@ -461,13 +496,16 @@ export function boot({ kit, BASE, CFG, xt }) {
       for (const t of saved.tabs) newSession(t);
       const ids = ordered();
       switchTo(ids[saved.active] || ids[0]);
-    } else newSession();
+    }
+    await adoptPending();
+    if (!sessions.size) newSession();
   }
   kit.initPluginView(() => {
     applyTheme(); stayMounted(); start();
     // The handshake can land after the boot fallback already tried with no bearer — retry
     // any tab that was turned away now that a token is here.
     for (const s of sessions.values()) if (s.status === "unauthorized") { s.retry = 0; connect(s); }
+    if (booted) adoptPending();   // the first try may have run before the bearer arrived
   });
   setTimeout(start, 1000);
 }
