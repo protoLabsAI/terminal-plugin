@@ -39,9 +39,13 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .wrap{display:flex;flex-direction:column;height:100%}
   .bar{display:flex;align-items:center;gap:6px;padding:4px 8px;flex:0 0 auto;min-width:0;
     border-bottom:var(--pl-border-width,1px) solid var(--pl-color-border,#26262b)}
-  .tabs{display:flex;gap:4px;overflow-x:auto;min-width:0;flex:0 1 auto;scrollbar-width:none}
+  /* overflow-y MUST be hidden: overflow-x:auto alone makes y "auto" too, and a WebKit
+     (desktop app) scrollbar there can feed back into the layout and flicker. */
+  .tabs{display:flex;align-items:center;gap:4px;overflow-x:auto;overflow-y:hidden;min-width:0;flex:0 1 auto;scrollbar-width:none}
   .tabs::-webkit-scrollbar{display:none}
-  .tab{display:flex;align-items:center;gap:6px;padding:3px 8px;border-radius:var(--pl-radius,6px);
+  /* A FIXED height: renaming (label → input) must not change the bar's height — a 1px
+     change resizes every terminal, and in the desktop app's WebKit that could loop. */
+  .tab{display:flex;align-items:center;gap:6px;height:22px;padding:0 8px;border-radius:var(--pl-radius,6px);
     background:transparent;color:var(--pl-color-fg-muted,#9a9aa5);border:1px solid transparent;
     cursor:pointer;font-size:11px;white-space:nowrap;flex:0 0 auto;user-select:none}
   .tab:hover{background:var(--pl-color-bg-raised,#1a1a1f)}
@@ -49,7 +53,7 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     border-color:var(--pl-color-border,#26262b)}
   .tab .tdot{width:6px;height:6px;border-radius:50%;background:var(--pl-color-fg-subtle,#6b6b76);flex:0 0 auto}
   .tab .tdot.ok{background:var(--pl-color-status-success,#4ade80)} .tab .tdot.bad{background:var(--pl-color-status-error,#f87171)}
-  .tab .rename{font:inherit;width:14ch;padding:0 2px;background:var(--pl-color-bg,#0a0a0c);color:var(--pl-color-fg,#ededed);
+  .tab .rename{font:inherit;line-height:14px;height:16px;box-sizing:border-box;margin:0;width:14ch;padding:0 2px;background:var(--pl-color-bg,#0a0a0c);color:var(--pl-color-fg,#ededed);
     border:1px solid var(--pl-color-accent,#9b87f2);border-radius:3px;outline:none}
   .tab .x{opacity:.6;font-size:13px;line-height:1} .tab .x:hover{opacity:1;color:var(--pl-color-status-error,#f87171)}
   button.pl{background:var(--pl-color-bg-raised,#1a1a1f);color:var(--pl-color-fg,#ededed);
@@ -61,7 +65,7 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .stat{color:var(--pl-color-fg-muted,#9a9aa5);font-size:11px;white-space:nowrap;flex:0 0 auto}
   .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--pl-color-fg-muted,#9a9aa5);margin-right:6px}
   .dot.ok{background:var(--pl-color-status-success,#4ade80)} .dot.bad{background:var(--pl-color-status-error,#f87171)}
-  #terms{position:relative;flex:1 1 auto;min-height:0}
+  #terms{position:relative;flex:1 1 auto;min-height:0;overflow:hidden}
   /* one body per tab; its layout tree renders as nested flex rows/cols of panes */
   .tabbody{position:absolute;inset:0;display:none;background:var(--pl-color-bg,#0a0a0c)}
   .tabbody.active{display:flex}

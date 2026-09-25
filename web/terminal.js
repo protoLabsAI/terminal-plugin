@@ -156,6 +156,9 @@ export function boot({ kit, BASE, CFG, xt }) {
     const p = panes.get(t.activePane);
     const lbl = el.querySelector(".lbl"); if (lbl) lbl.textContent = labelOf(t);
     const dot = el.querySelector(".tdot"); if (dot) dot.className = "tdot " + ((p && p.statusCls) || "");
+    // Titles arrive after boot (the shell sets them) and widen tabs — keep the active one
+    // in view, or it slides off the strip's edge and can't be seen or clicked.
+    if (t.id === activeTabId && el.scrollIntoView) el.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
 
   // Inline rename (a sandboxed iframe cannot rely on a native dialog). Clearing the name

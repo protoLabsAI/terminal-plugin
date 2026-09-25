@@ -92,6 +92,19 @@ def test_view_page_persists_sessions():
     assert "if (!p.el.offsetWidth || !p.el.offsetHeight) return;" in app
 
 
+def test_renaming_a_tab_cannot_change_the_layout():
+    """Regression (reported in the desktop app): double-click-to-rename grew the bar a few
+    px, resizing every terminal; with WebKit's always-on scrollbars the page's 1px overflow
+    then flickered a scrollbar in a refit loop."""
+    from terminal.view import PAGE
+
+    assert "html,body{margin:0;height:100%;" in PAGE and "overflow:hidden}" in PAGE.split("html,body{", 1)[1].split("}", 1)[0] + "}"
+    assert "overflow-x:auto;overflow-y:hidden" in PAGE  # the tab strip never scrolls vertically
+    assert ".tab{display:flex;align-items:center;gap:6px;height:22px;" in PAGE  # fixed tab height
+    assert "height:16px;box-sizing:border-box" in PAGE  # the rename input fits inside it
+    assert "#terms{position:relative;flex:1 1 auto;min-height:0;overflow:hidden}" in PAGE
+
+
 def test_view_integrates_with_the_console():
     from terminal.view import PAGE
 
