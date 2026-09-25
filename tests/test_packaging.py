@@ -48,7 +48,9 @@ def test_view_page_pulls_in_the_protoagent_theme_and_four_rules():
     assert "cdn.jsdelivr" not in PAGE and "https://" not in PAGE  # fully self-served, no CDN
     # the CANVAS renderer + customGlyphs is what makes block/box art render flush.
     assert "CanvasAddon" in PAGE and "customGlyphs" in PAGE
-    assert "/plugins/terminal/ws?token=" in PAGE
+    # the bearer rides the socket's first frame — never the URL (logs, history, proxies)
+    assert "/plugins/terminal/ws" in PAGE and "ws?token=" not in PAGE
+    assert 'type: "auth", token: tok' in PAGE
     # THE theme requirement: xterm's theme is built from protoAgent's --pl-* tokens,
     # and re-applied live on a re-theme (MutationObserver on :root).
     assert "--pl-color-bg" in PAGE and "--pl-color-fg" in PAGE and "--pl-color-accent" in PAGE
@@ -65,8 +67,46 @@ def test_view_page_has_multi_session_tabs():
     assert "const sessions = new Map()" in PAGE  # the session registry
 
 
+def test_view_page_persists_sessions():
+    from terminal.view import PAGE
+
+    # stays mounted while hidden (bridge background opt-in) so switching views keeps shells
+    assert 'type: "protoagent:subscribe", patterns: [], background: true' in PAGE
+    # remembers tabs + their server session ids across reloads, and reattaches by id
+    assert "localStorage" in PAGE and "session: s.sessionId" in PAGE
+    # the tab's × ends the shell explicitly (a bare disconnect only detaches)
+    assert 'type: "close"' in PAGE
+    # config comes from the server, not hardcoded
+    assert "__TERMINAL_CONFIG__" in PAGE and "fontSize: CFG.fontSize" in PAGE and "scrollback: CFG.scrollback" in PAGE
+    assert "prompt(" not in PAGE  # inline rename — a sandboxed iframe can't rely on prompt()
+
+
+def test_the_vendored_assets_are_auth_exempt():
+    from terminal.view import PAGE
+
+    # the page loads xterm from /plugins/terminal/static/ with no bearer — a token-gated
+    # host must exempt that prefix or every asset 401s
+    assert "/plugins/terminal/static/" in PAGE
+    assert "/plugins/terminal/static/" in _manifest()["public_paths"]
+
+
+def test_manifest_config_matches_the_code_defaults():
+    from terminal.api import DEFAULTS
+
+    assert _manifest()["config"] == DEFAULTS
+
+
+def test_every_setting_is_a_config_key():
+    m = _manifest()
+    keys = [s["key"] for s in m["settings"]]
+    assert set(keys) == set(m["config"])  # every knob is editable in Settings
+    for s in m["settings"]:
+        assert s["type"] in ("string", "number", "bool") and s["label"] and s["description"]
+
+
 def test_register_mounts_the_public_router(registry):
     import terminal
 
     terminal.register(registry)
     assert "/plugins/terminal" in registry.routers  # the public view + WS router
+    assert "terminal-sessions" in registry.surfaces  # shells are ended on shutdown
