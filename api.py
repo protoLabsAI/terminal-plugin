@@ -1,10 +1,10 @@
 """Terminal HTTP + WebSocket — the view page and the PTY bridge.
 
 ONE router on the PUBLIC ``/plugins/terminal`` prefix (the page is an iframe load that
-can't carry a bearer). The WebSocket verifies the operator bearer ITSELF from a
-``?token=`` query param against the host's configured token (``auth.token`` /
-``A2A_AUTH_TOKEN``) — a browser WS can't set an Authorization header. When the host has
-no bearer set (loopback dev) the WS is open on the bound interface and a warning fires.
+can't carry a bearer). The WebSocket verifies the operator bearer ITSELF against the
+host's configured token (``auth.token`` / ``A2A_AUTH_TOKEN``) — a browser WS can't set an
+Authorization header. When the host has no bearer set (loopback dev) the WS is open on
+the bound interface and a warning fires.
 
 AUTH is the FIRST message, not the URL: a ``?token=`` rides in access logs, browser
 history and proxies (the view bridge's own rule is "never a token in the URL"). The

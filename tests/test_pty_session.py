@@ -78,6 +78,31 @@ async def test_read_returns_empty_and_reaps_on_shell_exit():
         await s.aclose()
 
 
+async def test_a_signal_killed_shell_reports_eof_and_a_signal_exit_code():
+    """The common real-world ending: the shell is killed (kill -9, OOM, a crash) rather
+    than exiting cleanly. The reader must see EOF and poll() the negative-signal code."""
+    import os
+    import signal
+
+    s = PtySession(shell="/bin/sh")
+    s.start()
+    try:
+        os.kill(s.pid, signal.SIGKILL)
+
+        async def _drain():
+            while await s.read():
+                pass
+
+        await asyncio.wait_for(_drain(), 8.0)
+        for _ in range(100):
+            if s.poll() is not None:
+                break
+            await asyncio.sleep(0.02)
+        assert s.poll() == -signal.SIGKILL
+    finally:
+        await s.aclose()
+
+
 # ── backend selection + the Windows (pywinpty) backend ──────────────────────────
 
 
