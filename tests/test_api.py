@@ -412,3 +412,46 @@ def test_the_shell_exiting_reports_and_forgets_the_session(client, _fresh_manage
         else:
             raise AssertionError("no exit frame")
     assert _fresh_manager.get(sid) is None
+
+
+# ── the gated session list (a view adopts agent-opened tabs from it) ────────────
+
+
+def test_sessions_list_shape_and_pending_adoption(_fresh_manager):
+    """GET /api/plugins/terminal/sessions — lives under /api/plugins/… so the HOST's
+    default-deny bearer middleware gates it (not this router)."""
+    app = FastAPI()
+    app.include_router(api.build_api_router(), prefix="/api/plugins/terminal")
+    with TestClient(app) as c:
+        assert c.get("/api/plugins/terminal/sessions").json() == {"sessions": []}
+        s = c.portal.call(_create, _fresh_manager, {"name": "Agent", "origin": "agent", "pending_adopt": True})
+        got = c.get("/api/plugins/terminal/sessions").json()["sessions"]
+        assert got == [{"id": s.id, "name": "Agent", "origin": "agent", "pending_adopt": True, "attached": False}]
+        # an exited session drops off the list
+        c.portal.call(_fresh_manager.close, s.id)
+        assert c.get("/api/plugins/terminal/sessions").json() == {"sessions": []}
+
+
+def test_attaching_clears_pending_adoption(_fresh_manager):
+    app = FastAPI()
+    app.include_router(api.build_router({"shell": "/bin/cat"}), prefix="/plugins/terminal")
+    app.include_router(api.build_api_router(), prefix="/api/plugins/terminal")
+    with TestClient(app) as c:
+        s = c.portal.call(_create, _fresh_manager, {"shell": "/bin/cat", "pending_adopt": True})
+        with c.websocket_connect("/plugins/terminal/ws") as ws:
+            assert _auth(ws, session=s.id)["resumed"] is True
+            [row] = c.get("/api/plugins/terminal/sessions").json()["sessions"]
+            assert row["pending_adopt"] is False and row["attached"] is True
+        c.portal.call(_fresh_manager.close_all)
+
+
+async def _create(mgr, kw):
+    return mgr.create(**{"shell": "/bin/cat", **kw})
+
+
+def test_the_api_router_is_mounted_under_the_gated_prefix(registry):
+    import terminal
+
+    terminal.register(registry)
+    # /api/plugins/<id> is default-deny (bearer) in the host; /plugins/<id> is public
+    assert "/api/plugins/terminal" in registry.routers
