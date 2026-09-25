@@ -37,3 +37,23 @@ jobs:
 
       - name: Test (view JS)
         run: node --test tests/js/*.test.mjs
+
+  # The Windows backend (pywinpty) — a real cmd.exe through WinPtySession and the whole
+  # WebSocket bridge. The POSIX suites skip themselves here; tests/test_winpty.py only
+  # runs here.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dev deps + pywinpty
+        run: pip install -r requirements-dev.txt "pywinpty>=2.0"
+
+      - name: Test (Windows backend)
+        run: pytest -q tests/test_winpty.py tests/test_packaging.py tests/test_textutil.py
