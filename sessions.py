@@ -33,6 +33,8 @@ from .pty_session import open_session
 log = logging.getLogger("protoagent.plugins.terminal")
 
 DEFAULT_BUFFER_CHARS = 256 * 1024  # replay buffer per session (decoded text)
+HIGH_WATER = 64  # frames queued for a viewer before the pump stops reading the PTY
+REDRAW_NUDGE = 0.05  # seconds between the two halves of a resume redraw nudge
 
 
 class SessionLimitError(Exception):
@@ -54,6 +56,7 @@ class Session:
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._viewer: asyncio.Queue | None = None
         self._pump: asyncio.Task | None = None
+        self._redraw_pending = False
 
     @property
     def shell(self) -> str:
@@ -81,6 +84,11 @@ class Session:
                 # Incremental decode: a multi-byte char split across two reads must not
                 # turn into two U+FFFD replacement glyphs.
                 self._emit(self._decoder.decode(chunk))
+                # Flow control: while the viewer is behind, stop reading. The PTY buffer
+                # fills and the program blocks on write — what a real terminal does —
+                # instead of an unbounded queue growing under `yes` or a huge `cat`.
+                while self._viewer is not None and self._viewer.qsize() > HIGH_WATER:
+                    await asyncio.sleep(0.01)
             self._emit(self._decoder.decode(b"", final=True))
         except asyncio.CancelledError:
             raise
@@ -127,6 +135,10 @@ class Session:
             self._viewer.put_nowait({"type": "detached", "reason": "attached elsewhere"})
         self._viewer = queue
         self.detached_at = None
+        # A reattaching viewer replays raw output, which can't faithfully rebuild a
+        # full-screen app's screen (the alt-screen switch may be long gone from the
+        # buffer). Ask the program to repaint on the viewer's first resize.
+        self._redraw_pending = resumed
         queue.put_nowait(
             {"type": "connected", "session": self.id, "shell": self.shell, "cwd": self.cwd, "resumed": resumed}
         )
@@ -150,6 +162,14 @@ class Session:
         self.pty.write(data)
 
     def resize(self, cols: int, rows: int) -> None:
+        if self._redraw_pending and rows > 1:
+            # Two size changes → SIGWINCH even when the final size equals the old one, so
+            # vim/htop/less/TUI agents redraw their whole screen for the new viewer.
+            self._redraw_pending = False
+            self.pty.resize(cols, rows - 1)
+            asyncio.get_running_loop().call_later(REDRAW_NUDGE, self.pty.resize, cols, rows)
+            return
+        self._redraw_pending = False
         self.pty.resize(cols, rows)
 
     async def aclose(self) -> None:
@@ -186,6 +206,7 @@ class SessionManager:
         cols: int = 80,
         rows: int = 24,
         scrub_env: list[str] | None = None,
+        login: bool = False,
         max_sessions: int = 0,
         buffer_chars: int = DEFAULT_BUFFER_CHARS,
     ) -> Session:
@@ -193,7 +214,7 @@ class SessionManager:
         ``max_sessions`` (0 = unlimited) and whatever the PTY raises on spawn."""
         if max_sessions and len(self._sessions) >= max_sessions:
             raise SessionLimitError(f"session limit reached ({max_sessions}) — close a terminal first")
-        pty = open_session(shell=shell, cwd=cwd, cols=cols, rows=rows, scrub_env=scrub_env)
+        pty = open_session(shell=shell, cwd=cwd, cols=cols, rows=rows, scrub_env=scrub_env, login=login)
         pty.start()
         sid = secrets.token_urlsafe(12)
         sess = Session(sid, pty, buffer_chars=buffer_chars)

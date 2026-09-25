@@ -48,16 +48,30 @@ DEFAULTS = {
     "font_size": 13,
     "keep_alive_minutes": 30,
     "max_sessions": 12,
+    "login_shell": True,
+    "font_family": "",
+    "cursor_style": "block",
+    "option_as_meta": False,
+    "copy_on_select": False,
 }
+CURSOR_STYLES = ("block", "bar", "underline")
 
-# Vendored xterm assets served locally (offline — no CDN). Whitelisted by name.
-_VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
-_VENDOR_TYPES = {
-    "xterm.js": "application/javascript",
-    "xterm.css": "text/css",
-    "addon-fit.js": "application/javascript",
-    "addon-web-links.js": "application/javascript",
-    "addon-canvas.js": "application/javascript",
+# Static files served locally (offline — no CDN), WHITELISTED by name → (dir, media type):
+# the vendored xterm bundles + the view's own ES modules. No path ever reaches the disk
+# unless it is a key here, so traversal shapes simply 404.
+_ROOT = Path(__file__).resolve().parent
+_JS = "text/javascript"
+_STATIC = {
+    "xterm.js": (_ROOT / "vendor", _JS),
+    "xterm.css": (_ROOT / "vendor", "text/css"),
+    "addon-fit.js": (_ROOT / "vendor", _JS),
+    "addon-web-links.js": (_ROOT / "vendor", _JS),
+    "addon-canvas.js": (_ROOT / "vendor", _JS),
+    "addon-webgl.js": (_ROOT / "vendor", _JS),
+    "addon-search.js": (_ROOT / "vendor", _JS),
+    "addon-unicode11.js": (_ROOT / "vendor", _JS),
+    "terminal.js": (_ROOT / "web", _JS),
+    "logic.js": (_ROOT / "web", _JS),
 }
 
 
@@ -108,13 +122,31 @@ def resolve(cfg: dict | None) -> dict:
         "font_size": _num(raw["font_size"], DEFAULTS["font_size"], 8, 32),
         "keep_alive_minutes": _num(raw["keep_alive_minutes"], DEFAULTS["keep_alive_minutes"], 0, 7 * 24 * 60),
         "max_sessions": _num(raw["max_sessions"], DEFAULTS["max_sessions"], 1, 64),
+        "login_shell": _bool(raw["login_shell"]),
+        "font_family": str(raw["font_family"] or "").strip(),
+        "cursor_style": raw["cursor_style"] if raw["cursor_style"] in CURSOR_STYLES else DEFAULTS["cursor_style"],
+        "option_as_meta": _bool(raw["option_as_meta"]),
+        "copy_on_select": _bool(raw["copy_on_select"]),
     }
 
 
+def _bool(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def render_page(cfg: dict) -> str:
-    """The view page with the client-side config baked in (font size + scrollback), so
-    a Settings change shows up on the next view load."""
-    client = {"fontSize": cfg["font_size"], "scrollback": cfg["scrollback"]}
+    """The view page with the client-side config baked in, so a Settings change shows up
+    on the next view load."""
+    client = {
+        "fontSize": cfg["font_size"],
+        "scrollback": cfg["scrollback"],
+        "fontFamily": cfg["font_family"],
+        "cursorStyle": cfg["cursor_style"],
+        "optionAsMeta": cfg["option_as_meta"],
+        "copyOnSelect": cfg["copy_on_select"],
+    }
     # json.dumps output is safe inside <script> once "</" can't close the tag.
     return PAGE.replace("__TERMINAL_CONFIG__", json.dumps(client).replace("</", "<\\/"))
 
@@ -141,12 +173,13 @@ def build_router(cfg):
 
     @router.get("/static/{name}")
     async def _static(name: str):
-        # Vendored xterm assets (offline). Whitelisted — no path traversal.
-        media = _VENDOR_TYPES.get(name)
-        path = _VENDOR_DIR / name
-        if media is None or not path.is_file():
+        # Whitelisted by name — no path traversal. `no-cache` = revalidate every load
+        # (cheap: FileResponse sends ETag/Last-Modified), so a plugin upgrade never runs
+        # stale JS against a new server.
+        entry = _STATIC.get(name)
+        if entry is None or not (entry[0] / name).is_file():
             raise HTTPException(404)
-        return FileResponse(path, media_type=media)
+        return FileResponse(entry[0] / name, media_type=entry[1], headers={"Cache-Control": "no-cache"})
 
     @router.websocket("/ws")
     async def _ws(ws: WebSocket):
@@ -191,6 +224,7 @@ async def _bridge(ws, hello: dict, conf) -> None:
             sess = MANAGER.create(
                 shell=cfg["shell"],
                 cwd=cfg["cwd"],
+                login=cfg["login_shell"],
                 cols=_num(hello.get("cols"), 80, 1, 1000),
                 rows=_num(hello.get("rows"), 24, 1, 1000),
                 scrub_env=scrub_keys(),

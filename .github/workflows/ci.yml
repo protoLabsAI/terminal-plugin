@@ -21,11 +21,19 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Install dev deps
         run: pip install -r requirements-dev.txt ruff
 
       - name: Lint
         run: ruff check . && ruff format --check .
 
-      - name: Test
+      - name: Test (Python)
         run: pytest -q
+
+      - name: Test (view JS)
+        run: node --test tests/js/*.test.mjs

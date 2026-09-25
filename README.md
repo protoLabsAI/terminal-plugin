@@ -30,10 +30,39 @@ Install into any protoAgent agent from this git URL — it's not tied to one age
 - **protoAgent theming** — the xterm theme (background/foreground/cursor/selection +
   the 16 ANSI colours) is built from the console's `--pl-*` tokens on the DS-kit
   handshake and re-applied on every live re-theme.
-- **Crisp block art** — the canvas renderer with `customGlyphs` draws block/box-drawing
-  glyphs as exact cell-filling shapes, so contiguous block art (e.g. the Claude Code
-  splash) renders **flush, no seams** (the default DOM renderer draws them from the
-  font, which leaves gaps).
+- **Fast, crisp rendering** — the WebGL renderer (canvas when WebGL is unavailable or
+  loses its context) with `customGlyphs` draws block/box-drawing glyphs as exact
+  cell-filling shapes, so block art (e.g. the Claude Code splash) renders flush.
+  Emoji and CJK get correct widths (Unicode 11 tables).
+- **Behaves like your usual terminal** — shells start as **login shells**, so
+  `~/.zprofile` / `~/.bash_profile` run and PATH (Homebrew, pyenv, nvm…) matches
+  Terminal/iTerm even when protoAgent was launched from the desktop app. A UTF-8
+  locale is supplied when the server has none. Full-screen apps (vim, htop, Claude Code)
+  repaint when you reattach. A flood of output (`yes`, a huge `cat`) is flow-controlled
+  instead of buffering without limit.
+- **Console-native** — find in scrollback (⌘F), the console's own right-click menu
+  (copy, paste, select all, find, clear, tabs), and console shortcuts like the ⌘⇧K
+  palette keep working while the terminal has focus. Tabs follow the running program's
+  title (shown as the cwd's tail) until you rename them.
+
+## Keyboard
+
+| | macOS | Linux / Windows |
+|---|---|---|
+| Copy / paste | ⌘C / ⌘V | Ctrl+Shift+C / Ctrl+Shift+V |
+| Select all | ⌘A | Ctrl+Shift+A |
+| Find (Enter / Shift+Enter: next / previous) | ⌘F, then ⌘G / ⌘⇧G | Ctrl+Shift+F, then Ctrl+Shift+G |
+| Clear | ⌘K | right-click ▸ Clear (Ctrl+L in the shell) |
+| New tab / close tab | ⌘T / ⌘W | Ctrl+Shift+T / Ctrl+Shift+W |
+| Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab, ⌘⇧] / ⌘⇧[ | Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PgDn / Ctrl+PgUp |
+| Go to tab 1–9 | ⌘1 … ⌘9 (⌘9 = last) | Ctrl+1 … Ctrl+9 |
+| Font size bigger / smaller / reset | ⌘= / ⌘- / ⌘0 | Ctrl+= / Ctrl+- / Ctrl+0 |
+
+Everything else goes to the shell, except console shortcuts: on macOS any other ⌘ chord
+(⌘⇧K palette, ⌘, Settings…); elsewhere Ctrl+Shift chords and Ctrl+, — plain Ctrl+<key>
+(Ctrl-C, Ctrl-R, Ctrl-D…) always reaches the shell. (In a regular browser tab, the
+browser keeps ⌘T/⌘W/⌘N for itself; the desktop app passes them through.) Middle-click a
+tab to close it; double-click to rename it.
 
 ## Security — read this before enabling
 
@@ -79,7 +108,7 @@ runtime-status without a console rebuild (#853). No restart.
 Or from the CLI against a running server:
 
 ```bash
-python -m server plugin install https://github.com/protoLabsAI/terminal-plugin --ref v0.5.0
+python -m server plugin install https://github.com/protoLabsAI/terminal-plugin --ref v0.6.0
 # then pick it up live: hit "Sync" in the console Plugins panel, or have the agent call
 # reload_plugins (plugin-devkit). It hot-mounts — no restart.
 ```
@@ -95,6 +124,11 @@ terminal:
   font_size: 13
   keep_alive_minutes: 30    # detached shells live this long; 0 = end on disconnect
   max_sessions: 12
+  login_shell: true         # read ~/.zprofile etc, like Terminal/iTerm
+  font_family: ""           # blank → the console's mono font
+  cursor_style: block       # block | bar | underline
+  option_as_meta: false     # macOS: Option sends Meta (Option+B/F word jumps)
+  copy_on_select: false
 ```
 
 (Or edit them in **Settings ▸ Plugins ▸ Terminal**.)
@@ -109,16 +143,17 @@ Then open the **Terminal** rail icon. (Make sure the host has an operator bearer
 | `pty_session.py` | the PTY shell session: POSIX (stdlib `pty`) + Windows (`pywinpty`, experimental) behind `open_session()` |
 | `sessions.py` | the session manager: shells that outlive their socket — replay buffer, attach/takeover, keep-alive reaper |
 | `api.py` | the router: the public `/view` page (config baked in), vendored `/static/*` assets, the bearer-gated `/ws` attach bridge |
-| `view.py` | the xterm.js page — four rules + the `--pl-*` → xterm theme mapping |
-| `vendor/` | the vendored xterm.js + addons + css (served offline) |
+| `view.py` | the page shell — markup, styles, and the bootstrap that loads the kit, xterm and the app |
+| `web/terminal.js` | the view app — tabs, sessions/reconnect, keys, find, context menu, theme |
+| `web/logic.js` | pure view logic (key map, token → ANSI palette, labels) — `node --test tests/js/*.test.mjs` |
+| `vendor/` | the vendored xterm.js 5.5 + addons + css (served offline; versions in `vendor/VERSIONS.md`) |
 | `__init__.py` | `register()` — mounts the router (on live config) + a shutdown hook that ends every shell |
 
 ## Roadmap
 
-Multi-session tabs on persistent shells, a real PTY, themed + offline, configurable from
-Settings. Next: agent integration (let the agent open a terminal / run a command in one),
-console keybindings + a context menu + search, split panes, a fully token-derived ANSI
-palette, and validating the experimental Windows backend. PRs welcome.
+Next: agent integration (the agent can open a terminal, run a command in one, and read
+what's on screen), split panes, and validating the experimental Windows backend.
+PRs welcome.
 
 Enabled by default once installed (the WS bearer gate is the protection) — disable
 with `plugins.disabled: [terminal]`.

@@ -109,6 +109,32 @@ def test_view_reads_config_live_through_a_callable():
     assert '"fontSize": 19' in c.get("/plugins/terminal/view").text
 
 
+def test_resolve_normalizes_the_daily_driver_keys():
+    r = api.resolve(
+        {"cursor_style": "sparkle", "login_shell": "false", "option_as_meta": "yes", "font_family": "  Fira Code "}
+    )
+    assert r["cursor_style"] == "block" and r["login_shell"] is False and r["option_as_meta"] is True
+    assert r["font_family"] == "Fira Code"
+    assert api.resolve({})["login_shell"] is True  # login shells by default
+
+
+def test_view_carries_every_client_setting():
+    r = TestClient(
+        _app({"cursor_style": "bar", "option_as_meta": True, "copy_on_select": True, "font_family": "Iosevka"})
+    )
+    html = r.get("/plugins/terminal/view").text
+    for frag in ('"cursorStyle": "bar"', '"optionAsMeta": true', '"copyOnSelect": true', '"fontFamily": "Iosevka"'):
+        assert frag in html
+
+
+def test_app_modules_are_served_and_revalidated():
+    c = TestClient(_app())
+    for name in ("terminal.js", "logic.js", "addon-webgl.js", "addon-search.js", "addon-unicode11.js"):
+        r = c.get("/plugins/terminal/static/" + name)
+        assert r.status_code == 200 and "javascript" in r.headers["content-type"], name
+        assert r.headers["cache-control"] == "no-cache"  # an upgrade never runs stale JS
+
+
 def test_resolve_fills_defaults_and_clamps():
     r = api.resolve({"font_size": 999, "scrollback": "junk", "keep_alive_minutes": -5, "shell": ""})
     assert r["font_size"] == 32 and r["scrollback"] == api.DEFAULTS["scrollback"]
@@ -118,7 +144,7 @@ def test_resolve_fills_defaults_and_clamps():
 
 def test_render_page_cannot_be_broken_out_of_the_script_tag(monkeypatch):
     monkeypatch.setattr(api, "PAGE", "<script>var C = __TERMINAL_CONFIG__;</script>")
-    out = api.render_page({"font_size": 13, "scrollback": 5000})
+    out = api.render_page({**api.resolve({}), "font_family": "</script><script>alert(1)"})
     assert out.count("</script>") == 1
 
 

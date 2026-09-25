@@ -35,6 +35,25 @@ _TERM_ENV = {
 }
 
 
+def utf8_locale(env: dict[str, str]) -> dict[str, str]:
+    """A UTF-8 locale for the child when the server has none. A server launched from a GUI
+    (the desktop app, launchd) often has no LANG at all, so the shell falls back to the C
+    locale: UTF-8 input/output, emoji, and box-drawing break, and tools like `ls` mangle
+    names. Only fills a gap — an existing UTF-8 locale is left exactly as it is."""
+    current = env.get("LC_ALL") or env.get("LC_CTYPE") or env.get("LANG") or ""
+    if "utf-8" in current.lower() or "utf8" in current.lower():
+        return {}
+    return {"LANG": "en_US.UTF-8" if sys.platform == "darwin" else "C.UTF-8"}
+
+
+def login_argv0(shell: str) -> str:
+    """argv[0] for a LOGIN shell: the basename with a leading dash ("-zsh") — the
+    convention every terminal (Terminal.app, iTerm, login(1)) uses. A login shell reads
+    ~/.zprofile / ~/.bash_profile, so PATH (Homebrew, pyenv, nvm…) matches the operator's
+    usual terminal even when the server itself was started with a bare environment."""
+    return "-" + os.path.basename(shell)
+
+
 def default_shell() -> str:
     """The shell to spawn when none is configured: ``$SHELL`` then ``/bin/bash``."""
     return os.environ.get("SHELL") or "/bin/bash"
@@ -57,8 +76,10 @@ class PtySession:
         rows: int = 24,
         env_overrides: dict[str, str] | None = None,
         scrub_env: list[str] | None = None,
+        login: bool = False,
     ):
         self.shell = shell or default_shell()
+        self.login = bool(login)
         self.cwd = cwd or os.getcwd()
         self.cols = max(1, int(cols))
         self.rows = max(1, int(rows))
@@ -74,6 +95,7 @@ class PtySession:
         scrubbed keys (so the operator's own secrets don't leak into the shell)."""
         env = {k: v for k, v in os.environ.items() if k not in self._scrub_env}
         env.update(_TERM_ENV)
+        env.update(utf8_locale(env))
         env.update(self._env_overrides)
         return env
 
@@ -94,7 +116,8 @@ class PtySession:
             except OSError:
                 pass
             try:
-                os.execvpe(self.shell, [self.shell], env)
+                argv0 = login_argv0(self.shell) if self.login else self.shell
+                os.execvpe(self.shell, [argv0], env)
             except OSError:
                 os._exit(127)
         self.pid = pid
@@ -241,6 +264,7 @@ class WinPtySession:
         rows: int = 24,
         env_overrides: dict[str, str] | None = None,
         scrub_env: list[str] | None = None,
+        login: bool = False,  # POSIX-only concept; accepted for a uniform interface
     ):
         self.shell = shell or os.environ.get("COMSPEC") or "cmd.exe"
         self.cwd = cwd or os.getcwd()
