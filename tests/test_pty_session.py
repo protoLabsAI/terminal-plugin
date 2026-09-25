@@ -138,6 +138,14 @@ def test_login_argv0_is_the_dashed_basename():
     assert login_argv0("/opt/homebrew/bin/fish") == "-fish"
 
 
+def test_a_non_utf8_lc_all_or_lc_ctype_is_overridden_too():
+    # LC_ALL wins over LANG in POSIX resolution — filling LANG alone would be shadowed
+    out = utf8_locale({"LC_ALL": "C", "LANG": "C"})
+    assert "UTF-8" in out["LC_ALL"] and "UTF-8" in out["LANG"]
+    out = utf8_locale({"LC_CTYPE": "POSIX"})
+    assert "UTF-8" in out["LC_CTYPE"] and "LC_ALL" not in out
+
+
 @pytest.mark.parametrize(
     "env,expect_fill",
     [

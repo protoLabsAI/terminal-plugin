@@ -39,11 +39,20 @@ def utf8_locale(env: dict[str, str]) -> dict[str, str]:
     """A UTF-8 locale for the child when the server has none. A server launched from a GUI
     (the desktop app, launchd) often has no LANG at all, so the shell falls back to the C
     locale: UTF-8 input/output, emoji, and box-drawing break, and tools like `ls` mangle
-    names. Only fills a gap — an existing UTF-8 locale is left exactly as it is."""
+    names. Only fills a gap — an effective UTF-8 locale is left exactly as it is.
+
+    POSIX precedence is LC_ALL > LC_CTYPE > LANG, so setting LANG alone would be silently
+    shadowed by a non-UTF-8 LC_ALL / LC_CTYPE (e.g. "C"); those are overridden too."""
+    utf8 = lambda v: "utf-8" in v.lower() or "utf8" in v.lower()  # noqa: E731
     current = env.get("LC_ALL") or env.get("LC_CTYPE") or env.get("LANG") or ""
-    if "utf-8" in current.lower() or "utf8" in current.lower():
+    if utf8(current):
         return {}
-    return {"LANG": "en_US.UTF-8" if sys.platform == "darwin" else "C.UTF-8"}
+    value = "en_US.UTF-8" if sys.platform == "darwin" else "C.UTF-8"
+    out = {"LANG": value}
+    for key in ("LC_ALL", "LC_CTYPE"):
+        if env.get(key) and not utf8(env[key]):
+            out[key] = value
+    return out
 
 
 def login_argv0(shell: str) -> str:
