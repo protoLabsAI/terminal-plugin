@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 from fastapi import FastAPI, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from terminal import api
@@ -17,6 +18,7 @@ def _fresh_manager(monkeypatch):
     mgr = SessionManager()
     monkeypatch.setattr(api, "MANAGER", mgr)
     monkeypatch.delenv("A2A_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr(api, "_tickets", {})
     return mgr
 
 
@@ -25,8 +27,8 @@ def client(_fresh_manager):
     """A TestClient held open for the whole test — one event loop, so a session's pump
     task survives across websocket_connect calls — that ends every shell on teardown."""
 
-    def make(cfg=None):
-        c = TestClient(_app(cfg))
+    def make(cfg=None, gate=None):
+        c = TestClient(_app(cfg, gate=gate))
         c.__enter__()
         made.append(c)
         return c
@@ -56,8 +58,18 @@ def _auth(ws, token="", session=None):
     return m
 
 
-def _app(cfg=None):
+def _app(cfg=None, gate=None):
     app = FastAPI()
+    if gate is not None:
+        # Mimic the host: its default-deny auth middleware bearer-gates every HTTP
+        # /api/plugins/* route (it doesn't see WS handshakes — the WS gates itself).
+        @app.middleware("http")
+        async def _host_gate(request, call_next):
+            if request.url.path.startswith("/api/") and request.headers.get("authorization") != f"Bearer {gate}":
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return await call_next(request)
+
+    app.include_router(api.build_api_router(), prefix="/api/plugins/terminal")
     # `cat` echoes its stdin deterministically (no shell prompt/init/echo race), so the
     # WS round-trip is stable across platforms — the shell behaviour itself is covered
     # by test_pty_session against /bin/sh.
@@ -372,3 +384,133 @@ def test_the_shell_exiting_reports_and_forgets_the_session(client, _fresh_manage
         else:
             raise AssertionError("no exit frame")
     assert _fresh_manager.get(sid) is None
+
+
+# ── single-use tickets (the fleet-member path) ───────────────────────────────────
+# Through the desktop hub, the console's operator bearer never matches a member's own
+# (fleet service) token, so an in-band `token` is refused. The ticket route is plain
+# HTTP on the gated /api/plugins/* prefix: the hub authenticates it and forwards it with
+# the fleet token, so the member mints — and the WS trusts the ticket.
+
+
+@pytest.fixture
+def gated(client):
+    """A client whose app bearer-gates /api/* like the host does, with ``gate`` as the
+    accepted bearer (on a fleet member: the fleet service token the hub forwards)."""
+    return lambda gate="fleet-tok": client({"shell": "/bin/cat"}, gate=gate)
+
+
+def _mint(c, bearer="fleet-tok"):
+    r = c.post("/api/plugins/terminal/ticket", headers={"Authorization": f"Bearer {bearer}"})
+    assert r.status_code == 200, r.text
+    assert r.headers["cache-control"] == "no-store"
+    return r.json()["ticket"]
+
+
+def test_ticket_mint_requires_the_hosts_bearer(monkeypatch, gated):
+    monkeypatch.setenv("A2A_AUTH_TOKEN", "fleet-tok")
+    c = gated()
+    assert c.post("/api/plugins/terminal/ticket").status_code == 401
+    assert c.post("/api/plugins/terminal/ticket", headers={"Authorization": "Bearer operator"}).status_code == 401
+    t = _mint(c)
+    assert isinstance(t, str) and len(t) >= 32
+
+
+def test_the_fleet_case_ticket_admits_where_the_operator_token_cannot(monkeypatch, gated):
+    # The member's bearer is the FLEET token; the console only knows the OPERATOR token.
+    monkeypatch.setenv("A2A_AUTH_TOKEN", "fleet-tok")
+    c = gated()
+    with c.websocket_connect("/plugins/terminal/ws") as ws:  # the pre-fix behaviour: 4001
+        ws.send_json({"type": "auth", "token": "operator-tok"})
+        assert ws.receive_json() == {"type": "error", "message": "unauthorized"}
+    ticket = _mint(c)  # what the hub forwards: the ticket POST, re-authed with the fleet token
+    with c.websocket_connect("/plugins/terminal/ws") as ws:
+        ws.send_json({"type": "auth", "ticket": ticket, "token": "operator-tok", "cols": 80, "rows": 24})
+        m = ws.receive_json()
+        assert m["type"] == "connected" and m["session"]
+
+
+def test_a_ticket_is_single_use(monkeypatch, gated):
+    monkeypatch.setenv("A2A_AUTH_TOKEN", "fleet-tok")
+    c = gated()
+    ticket = _mint(c)
+    with c.websocket_connect("/plugins/terminal/ws") as ws:
+        ws.send_json({"type": "auth", "ticket": ticket})
+        sid = ws.receive_json()["session"]
+    with c.websocket_connect("/plugins/terminal/ws") as ws:  # replay → refused, even to reattach
+        ws.send_json({"type": "auth", "ticket": ticket, "session": sid})
+        assert ws.receive_json() == {"type": "error", "message": "unauthorized"}
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 4001
+    with c.websocket_connect("/plugins/terminal/ws") as ws:  # a FRESH ticket reattaches
+        ws.send_json({"type": "auth", "ticket": _mint(c), "session": sid})
+        m = ws.receive_json()
+        assert m["type"] == "connected" and m["session"] == sid and m["resumed"] is True
+
+
+def test_a_wrong_ticket_is_refused_with_4001(monkeypatch, client):
+    monkeypatch.setenv("A2A_AUTH_TOKEN", "fleet-tok")
+    c = client()
+    with c.websocket_connect("/plugins/terminal/ws") as ws:
+        ws.send_json({"type": "auth", "ticket": "not-a-ticket"})
+        assert ws.receive_json() == {"type": "error", "message": "unauthorized"}
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 4001
+
+
+def test_a_ticket_expires(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(api.time, "monotonic", lambda: clock[0])
+    t = api.mint_ticket()
+    clock[0] += api.TICKET_TTL + 0.01
+    assert api.consume_ticket(t) is False
+    t2 = api.mint_ticket()
+    clock[0] += api.TICKET_TTL - 1
+    assert api.consume_ticket(t2) is True
+    assert api.consume_ticket(t2) is False  # burned
+
+
+def test_ticket_ttl_is_short_and_tickets_are_random():
+    assert 0 < api.TICKET_TTL <= 30
+    assert len({api.mint_ticket() for _ in range(50)}) == 50
+
+
+def test_expired_tickets_are_pruned(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(api.time, "monotonic", lambda: clock[0])
+    for _ in range(5):
+        api.mint_ticket()
+    clock[0] += api.TICKET_TTL + 1
+    api.mint_ticket()
+    assert len(api._tickets) == 1  # the store can't grow without bound
+
+
+def test_the_token_path_still_works_alongside_tickets(monkeypatch, client):
+    monkeypatch.setenv("A2A_AUTH_TOKEN", "s3cret")
+    c = client()
+    with c.websocket_connect("/plugins/terminal/ws") as ws:
+        m = _auth(ws, token="s3cret")
+        assert m["type"] == "connected"
+
+
+def test_open_loopback_still_admits_without_a_credential(client):
+    # No host bearer configured → open (unchanged) — even with a junk ticket.
+    c = client()
+    with c.websocket_connect("/plugins/terminal/ws") as ws:
+        ws.send_json({"type": "auth", "ticket": "junk"})
+        assert ws.receive_json()["type"] == "connected"
+
+
+def test_tickets_are_never_logged(monkeypatch, caplog, gated):
+    import logging
+
+    monkeypatch.setenv("A2A_AUTH_TOKEN", "fleet-tok")
+    caplog.set_level(logging.DEBUG)
+    c = gated()
+    ticket = _mint(c)
+    with c.websocket_connect("/plugins/terminal/ws") as ws:
+        ws.send_json({"type": "auth", "ticket": ticket})
+        ws.receive_json()
+    assert ticket not in caplog.text

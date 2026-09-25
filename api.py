@@ -8,15 +8,25 @@ the bound interface and a warning fires.
 
 AUTH is the FIRST message, not the URL: a ``?token=`` rides in access logs, browser
 history and proxies (the view bridge's own rule is "never a token in the URL"). The
-socket is accepted, then must send ``{type:"auth", token, session?, cols?, rows?}``
+socket is accepted, then must send ``{type:"auth", ticket|token, session?, cols?, rows?}``
 within ``AUTH_TIMEOUT`` seconds or it is closed with 4001.
+
+TICKETS are the primary credential. The view first calls ``POST
+/api/plugins/terminal/ticket`` — a plain HTTP route under the host's GATED
+``/api/plugins/*`` prefix, so the host's operator-bearer middleware authenticates it —
+and presents the single-use, ~30 s ticket it gets back. That is what makes the terminal
+work on a fleet MEMBER reached through the desktop hub: the hub authenticates the HTTP
+call and swaps the operator bearer for the fleet service token the member expects
+(ADR 0089), whereas an in-band operator ``token`` would reach the member unswapped and
+never match its (fleet) bearer. The ``token`` path stays for direct connections and
+older views.
 
 SESSIONS outlive the socket (see ``sessions.py``): ``auth.session`` reattaches to a
 live shell (replaying its buffered output); none/unknown spawns a new one. A dropped
 socket only detaches; ``{type:"close"}`` kills the shell.
 
 Wire protocol (JSON, modelled on protoMaker's terminal):
-  client → server: {auth, token, session?, cols?, rows?} · {input, data} ·
+  client → server: {auth, ticket|token, session?, cols?, rows?} · {input, data} ·
                    {resize, cols, rows} · {ping} · {close}
   server → client: {connected, session, shell, cwd, resumed} · {data, data} ·
                    {exit, exitCode} · {detached, reason} · {error, message} · {pong}
@@ -29,6 +39,8 @@ import hmac
 import json
 import logging
 import os
+import secrets
+import time
 from pathlib import Path
 
 from fastapi import WebSocket  # module-level so the websocket route's annotation resolves
@@ -81,6 +93,49 @@ def verify_token(expected: str, provided: str) -> bool:
     if not expected:
         return True
     return bool(provided) and hmac.compare_digest(expected, provided)
+
+
+# ── single-use WS tickets ────────────────────────────────────────────────────────
+# Minted only by the gated HTTP route, so holding one proves the caller cleared the
+# host's operator gate. In-process, short-lived, burned on first use — a ticket that
+# leaks anywhere is near-worthless. Never logged.
+TICKET_TTL = 30.0
+_tickets: dict[str, float] = {}
+
+
+def _prune_tickets(now: float) -> None:
+    for k in [k for k, exp in _tickets.items() if exp <= now]:
+        _tickets.pop(k, None)
+
+
+def mint_ticket() -> str:
+    """Issue a random single-use ticket, good for ``TICKET_TTL`` seconds."""
+    now = time.monotonic()
+    _prune_tickets(now)
+    t = secrets.token_urlsafe(32)
+    _tickets[t] = now + TICKET_TTL
+    return t
+
+
+def consume_ticket(ticket: str) -> bool:
+    """Validate + burn a ticket. False if missing, unknown, replayed or expired."""
+    if not ticket or not isinstance(ticket, str):
+        return False
+    now = time.monotonic()
+    exp = _tickets.pop(ticket, None)
+    _prune_tickets(now)
+    return exp is not None and exp > now
+
+
+def authorized(hello: dict | None) -> bool:
+    """Does this auth frame admit the socket? A valid ticket always does; otherwise the
+    operator ``token`` path (which is open when the host has no bearer configured)."""
+    if hello is None:
+        return False
+    ticket = hello.get("ticket")
+    if ticket and consume_ticket(str(ticket)):
+        return True
+    return verify_token(expected_token(), str(hello.get("token") or ""))
 
 
 def scrub_keys() -> list[str]:
@@ -152,9 +207,9 @@ def build_router(cfg):
     async def _ws(ws: WebSocket):
         await ws.accept()
         hello = await _receive_auth(ws)
-        if hello is None or not verify_token(expected_token(), str(hello.get("token") or "")):
+        if not authorized(hello):
             await _safe_send(ws, {"type": "error", "message": "unauthorized"})
-            await _safe_close(ws, code=4001)  # bad/missing operator bearer
+            await _safe_close(ws, code=4001)  # bad/missing/replayed ticket or operator bearer
             return
         if not expected_token():
             log.warning(
@@ -162,6 +217,22 @@ def build_router(cfg):
                 "the bound interface; set auth.token / A2A_AUTH_TOKEN before exposing it"
             )
         await _bridge(ws, hello, conf)
+
+    return router
+
+
+def build_api_router():
+    """The GATED router — mount under ``/api/plugins/terminal``. The host's operator-bearer
+    middleware covers every ``/api/plugins/*`` HTTP route, so only an authenticated
+    console (or, on a fleet member, the hub forwarding with the fleet token) mints."""
+    from fastapi import APIRouter
+    from fastapi.responses import JSONResponse
+
+    router = APIRouter()
+
+    @router.post("/ticket")
+    async def _ticket():
+        return JSONResponse({"ticket": mint_ticket(), "ttl": TICKET_TTL}, headers={"Cache-Control": "no-store"})
 
     return router
 
