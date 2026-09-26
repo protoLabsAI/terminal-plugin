@@ -80,6 +80,28 @@ def home_dir() -> str:
     return os.getcwd()
 
 
+def display_path(path: str) -> str:
+    """A path as a tab label: under home it's ``~``-relative ("~", "~/dev/app") — what
+    shells print in their titles — else the path as-is."""
+    if not path:
+        return ""
+    try:
+        # Normalize FIRST and work on the normalized forms throughout — slicing the raw
+        # path by the home prefix's length breaks on "./" / "../" / doubled separators.
+        clean = _ospath.normpath(path)
+        home = _ospath.normpath(home_dir())
+    except (TypeError, ValueError):
+        return path
+    norm, h = _ospath.normcase(clean), _ospath.normcase(home)
+    if norm == h:
+        return "~"
+    sep = _ospath.sep
+    prefix = h.rstrip(sep) + sep
+    if norm.startswith(prefix):
+        return "~" + sep + clean[len(prefix) :]
+    return clean
+
+
 def resolve_cwd(cwd: str = "") -> tuple[str, str]:
     """Where a new shell starts, plus a one-line notice ('' when none).
 

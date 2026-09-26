@@ -84,6 +84,8 @@ export function boot({ kit, BASE, CFG, xt }) {
         // Session ids ("" = a pane whose shell hasn't connected yet → a fresh one).
         layout: mapPanes(t.root, (id) => { const p = panes.get(id); return p ? (p.sessionId || "") : null; }),
         activeIndex: Math.max(0, panesOf(t.root).indexOf(t.activePane)),
+        // Last-seen titles by session id, so a reload shows them at once (not a placeholder).
+        titles: Object.fromEntries(panesOf(t.root).map((id) => panes.get(id)).filter((p) => p && p.sessionId && p.title).map((p) => [p.sessionId, p.title])),
       })),
     }));
   }
@@ -95,6 +97,7 @@ export function boot({ kit, BASE, CFG, xt }) {
       // v0.5–0.7 saved one session per tab; v0.8+ saves a layout tree.
       layout: (t && validate(t.layout)) || leaf((t && t.session) || ""),
       activeIndex: (t && t.activeIndex) || 0,
+      titles: (t && t.titles && typeof t.titles === "object") ? t.titles : {},
     }));
     out.active = raw.active;
     return out;
@@ -320,6 +323,8 @@ export function boot({ kit, BASE, CFG, xt }) {
         const t = tabById(p.tabId);
         if (t && m.name && !t.customName && panesOf(t.root).length === 1) t.customName = m.name;   // "Agent"
         p.origin = m.origin || p.origin;
+        // Until the shell titles itself, the tab reads the shell's live cwd ("~/dev/app").
+        if (!p.title && m.label) { p.title = m.label; const tt = tabById(p.tabId); if (tt && tt.activePane === p.id) refreshTab(tt); }
         save();
         if (isActive(p)) send(p, { type: "focus" });
         p.meta = (m.shell || "") + "  " + (m.cwd || "");
@@ -425,13 +430,19 @@ export function boot({ kit, BASE, CFG, xt }) {
   }
 
   // ── tabs ──────────────────────────────────────────────────────────────────────
-  function newTab({ name, customName = null, layout = null, activeIndex = 0, focus = true } = {}) {
+  function newTab({ name, customName = null, layout = null, activeIndex = 0, focus = true, titles = {} } = {}) {
     const id = "t" + (++tabSeq);
     const el = document.createElement("div"); el.className = "tabbody"; el.dataset.id = id; $("terms").appendChild(el);
-    const t = { id, name: name || "Terminal " + tabSeq, customName: customName || null, root: null, activePane: null, el };
+    // Named by where its shell starts ("~"), not "Terminal N" — so there's no flash of a
+    // placeholder before the shell sets its title.
+    const t = { id, name: name || CFG.startDir || "Terminal " + tabSeq, customName: customName || null, root: null, activePane: null, el };
     tabs.push(t);
     // The saved tree carries session ids; swap each for a live pane attached to it.
-    t.root = mapPanes(layout || leaf(""), (sid) => newPane(id, { session: sid }).id) || leaf(newPane(id).id);
+    t.root = mapPanes(layout || leaf(""), (sid) => {
+      const p = newPane(id, { session: sid });
+      if (sid && typeof titles[sid] === "string") p.title = titles[sid];
+      return p.id;
+    }) || leaf(newPane(id).id);
     const ids = panesOf(t.root);
     t.activePane = ids[Math.min(Math.max(0, activeIndex), ids.length - 1)];
     renderLayout(t);
@@ -455,6 +466,7 @@ export function boot({ kit, BASE, CFG, xt }) {
     const t = activeTab(), from = activePane(); if (!t || !from) return;
     // The new shell starts where the pane it split from is (the server resolves its cwd).
     const fresh = newPane(t.id, { cwdFrom: from.sessionId });
+    fresh.title = from.title;   // it starts where `from` is — don't flash a placeholder label
     t.root = split(t.root, from.id, fresh.id, dir);
     t.activePane = fresh.id;
     renderLayout(t); renderTabs();
