@@ -29,10 +29,13 @@ import time
 from collections import deque
 
 from .pty_session import open_session
+from .textutil import alt_screen_after
 
 log = logging.getLogger("protoagent.plugins.terminal")
 
 DEFAULT_BUFFER_CHARS = 256 * 1024  # replay buffer per session (decoded text)
+HIGH_WATER = 64  # frames queued for a viewer before the pump stops reading the PTY
+REDRAW_NUDGE = 0.05  # seconds between the two halves of a resume redraw nudge
 
 
 class SessionLimitError(Exception):
@@ -42,9 +45,26 @@ class SessionLimitError(Exception):
 class Session:
     """One live shell + its replay buffer + (at most) one attached viewer."""
 
-    def __init__(self, sid: str, pty, *, buffer_chars: int = DEFAULT_BUFFER_CHARS):
+    def __init__(
+        self,
+        sid: str,
+        pty,
+        *,
+        buffer_chars: int = DEFAULT_BUFFER_CHARS,
+        name: str = "",
+        origin: str = "operator",
+        pending_adopt: bool = False,
+    ):
         self.id = sid
         self.pty = pty
+        self.name = name  # a tab name the SERVER chose (agent tabs); "" = the view names it
+        self.origin = origin  # "operator" (a view's + / ⌘T) or "agent" (a tool opened it)
+        # Opened by a tool while no view held it: the next view to load (or the live one,
+        # via the session_opened event) should add a tab for it. Cleared on first attach.
+        self.pending_adopt = pending_adopt
+        self.focused_at = 0.0  # monotonic time a view last showed this tab (0 = never)
+        self.emitted = 0  # total chars ever emitted — a cursor for "output since X"
+        self.alt_screen = False  # a full-screen program (vim, less, htop) is up
         self.detached_at: float | None = time.monotonic()  # no viewer yet
         self.exit_code: int | None = None
         self.exited = False
@@ -54,6 +74,7 @@ class Session:
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._viewer: asyncio.Queue | None = None
         self._pump: asyncio.Task | None = None
+        self._redraw_pending = False
 
     @property
     def shell(self) -> str:
@@ -81,6 +102,11 @@ class Session:
                 # Incremental decode: a multi-byte char split across two reads must not
                 # turn into two U+FFFD replacement glyphs.
                 self._emit(self._decoder.decode(chunk))
+                # Flow control: while the viewer is behind, stop reading. The PTY buffer
+                # fills and the program blocks on write — what a real terminal does —
+                # instead of an unbounded queue growing under `yes` or a huge `cat`.
+                while self._viewer is not None and self._viewer.qsize() > HIGH_WATER:
+                    await asyncio.sleep(0.01)
             self._emit(self._decoder.decode(b"", final=True))
         except asyncio.CancelledError:
             raise
@@ -95,6 +121,9 @@ class Session:
     def _emit(self, text: str) -> None:
         if not text:
             return
+        self.emitted += len(text)
+        if "\x1b[?" in text:
+            self.alt_screen = alt_screen_after(text, self.alt_screen)
         self._buffer.append(text)
         self._buffered += len(text)
         while self._buffered > self._buffer_chars and len(self._buffer) > 1:
@@ -115,6 +144,19 @@ class Session:
                 text = text[nl + 1 :]
         return text
 
+    def text_since(self, pos: int) -> tuple[str, bool]:
+        """Output emitted after cursor ``pos`` (an earlier ``emitted``), and whether all of
+        it is still buffered (False = the start scrolled out of the replay buffer)."""
+        want = max(0, self.emitted - pos)
+        text = "".join(self._buffer)
+        return (text[-want:] if want else ""), want <= len(text)
+
+    def busy(self) -> int | None:
+        """The foreground process group when a program other than the shell holds the
+        terminal (vim, a build, a REPL), else None. None too when it can't be told."""
+        fg = self.pty.foreground_pgid() if hasattr(self.pty, "foreground_pgid") else None
+        return fg if fg and self.pty.pid and fg != self.pty.pid else None
+
     def _send(self, msg: dict) -> None:
         if self._viewer is not None:
             self._viewer.put_nowait(msg)
@@ -127,7 +169,22 @@ class Session:
             self._viewer.put_nowait({"type": "detached", "reason": "attached elsewhere"})
         self._viewer = queue
         self.detached_at = None
-        connected = {"type": "connected", "session": self.id, "shell": self.shell, "cwd": self.cwd, "resumed": resumed}
+        self.pending_adopt = False
+        # A reattaching viewer replays raw output, which can't faithfully rebuild a
+        # full-screen app's screen (the alt-screen switch may be long gone from the
+        # buffer). Ask the program to repaint on the viewer's first resize — only when a
+        # full-screen program is up: at a plain prompt the replay is already right, and
+        # an extra SIGWINCH just makes zsh reprint its prompt (a stray "%" per reload).
+        self._redraw_pending = resumed and self.alt_screen
+        connected = {
+            "type": "connected",
+            "session": self.id,
+            "shell": self.shell,
+            "cwd": self.cwd,
+            "resumed": resumed,
+            "name": self.name,
+            "origin": self.origin,
+        }
         notice = getattr(self.pty, "cwd_notice", "")
         if notice and not resumed:  # e.g. the configured starting directory is missing
             connected["notice"] = notice
@@ -152,6 +209,14 @@ class Session:
         self.pty.write(data)
 
     def resize(self, cols: int, rows: int) -> None:
+        if self._redraw_pending and rows > 1:
+            # Two size changes → SIGWINCH even when the final size equals the old one, so
+            # vim/htop/less/TUI agents redraw their whole screen for the new viewer.
+            self._redraw_pending = False
+            self.pty.resize(cols, rows - 1)
+            asyncio.get_running_loop().call_later(REDRAW_NUDGE, self.pty.resize, cols, rows)
+            return
+        self._redraw_pending = False
         self.pty.resize(cols, rows)
 
     async def aclose(self) -> None:
@@ -174,6 +239,20 @@ class SessionManager:
     def __len__(self) -> int:
         return len(self._sessions)
 
+    def list(self) -> list[Session]:
+        """Live sessions, oldest first."""
+        return [s for s in self._sessions.values() if not s.exited]
+
+    def active(self) -> Session | None:
+        """The tab the operator looked at most recently (a view reports focus)."""
+        live = [s for s in self.list() if s.focused_at]
+        return max(live, key=lambda s: s.focused_at) if live else None
+
+    def agent_session(self) -> Session | None:
+        """The agent's own reusable tab, if it's still open."""
+        mine = [s for s in self.list() if s.origin == "agent"]
+        return mine[-1] if mine else None
+
     def get(self, sid: str | None) -> Session | None:
         if not sid:
             return None
@@ -188,17 +267,21 @@ class SessionManager:
         cols: int = 80,
         rows: int = 24,
         scrub_env: list[str] | None = None,
+        login: bool = False,
         max_sessions: int = 0,
         buffer_chars: int = DEFAULT_BUFFER_CHARS,
+        name: str = "",
+        origin: str = "operator",
+        pending_adopt: bool = False,
     ) -> Session:
         """Spawn a shell and start its pump. Raises ``SessionLimitError`` past
         ``max_sessions`` (0 = unlimited) and whatever the PTY raises on spawn."""
         if max_sessions and len(self._sessions) >= max_sessions:
             raise SessionLimitError(f"session limit reached ({max_sessions}) — close a terminal first")
-        pty = open_session(shell=shell, cwd=cwd, cols=cols, rows=rows, scrub_env=scrub_env)
+        pty = open_session(shell=shell, cwd=cwd, cols=cols, rows=rows, scrub_env=scrub_env, login=login)
         pty.start()
         sid = secrets.token_urlsafe(12)
-        sess = Session(sid, pty, buffer_chars=buffer_chars)
+        sess = Session(sid, pty, buffer_chars=buffer_chars, name=name, origin=origin, pending_adopt=pending_adopt)
         self._sessions[sid] = sess
         sess.start_pump(self._forget)
         return sess

@@ -3,8 +3,8 @@
 Two backends behind one interface (start / read / write / resize / poll / aclose):
 - ``PtySession`` — POSIX (Linux/macOS), stdlib only (``pty``/``os``/``fcntl``/
   ``termios``); no pip deps, so the suite spawns real PTYs in CI.
-- ``WinPtySession`` — Windows, via the optional ``pywinpty`` package (EXPERIMENTAL,
-  untested in our Linux CI — see ``requires_pip`` in the manifest).
+- ``WinPtySession`` — Windows, via the optional ``pywinpty`` package (``requires_pip`` in
+  the manifest); validated by the CI windows job (tests/test_winpty.py, a real cmd.exe).
 
 ``open_session(...)`` picks the right backend for the platform. The POSIX session owns
 a child shell behind a pseudo-terminal: read its output off the master fd (in a thread,
@@ -33,6 +33,34 @@ _TERM_ENV = {
     "COLORTERM": "truecolor",
     "TERM_PROGRAM": "protoagent-terminal",
 }
+
+
+def utf8_locale(env: dict[str, str]) -> dict[str, str]:
+    """A UTF-8 locale for the child when the server has none. A server launched from a GUI
+    (the desktop app, launchd) often has no LANG at all, so the shell falls back to the C
+    locale: UTF-8 input/output, emoji, and box-drawing break, and tools like `ls` mangle
+    names. Only fills a gap — an effective UTF-8 locale is left exactly as it is.
+
+    POSIX precedence is LC_ALL > LC_CTYPE > LANG, so setting LANG alone would be silently
+    shadowed by a non-UTF-8 LC_ALL / LC_CTYPE (e.g. "C"); those are overridden too."""
+    utf8 = lambda v: "utf-8" in v.lower() or "utf8" in v.lower()  # noqa: E731
+    current = env.get("LC_ALL") or env.get("LC_CTYPE") or env.get("LANG") or ""
+    if utf8(current):
+        return {}
+    value = "en_US.UTF-8" if sys.platform == "darwin" else "C.UTF-8"
+    out = {"LANG": value}
+    for key in ("LC_ALL", "LC_CTYPE"):
+        if env.get(key) and not utf8(env[key]):
+            out[key] = value
+    return out
+
+
+def login_argv0(shell: str) -> str:
+    """argv[0] for a LOGIN shell: the basename with a leading dash ("-zsh") — the
+    convention every terminal (Terminal.app, iTerm, login(1)) uses. A login shell reads
+    ~/.zprofile / ~/.bash_profile, so PATH (Homebrew, pyenv, nvm…) matches the operator's
+    usual terminal even when the server itself was started with a bare environment."""
+    return "-" + os.path.basename(shell)
 
 
 # Path helpers behind one seam, so a test can swap in ``ntpath`` to exercise the
@@ -91,8 +119,10 @@ class PtySession:
         rows: int = 24,
         env_overrides: dict[str, str] | None = None,
         scrub_env: list[str] | None = None,
+        login: bool = False,
     ):
         self.shell = shell or default_shell()
+        self.login = bool(login)
         self.cwd, self.cwd_notice = resolve_cwd(cwd)
         self.cols = max(1, int(cols))
         self.rows = max(1, int(rows))
@@ -108,6 +138,7 @@ class PtySession:
         scrubbed keys (so the operator's own secrets don't leak into the shell)."""
         env = {k: v for k, v in os.environ.items() if k not in self._scrub_env}
         env.update(_TERM_ENV)
+        env.update(utf8_locale(env))
         env.update(self._env_overrides)
         return env
 
@@ -128,7 +159,8 @@ class PtySession:
             except OSError:
                 pass
             try:
-                os.execvpe(self.shell, [self.shell], env)
+                argv0 = login_argv0(self.shell) if self.login else self.shell
+                os.execvpe(self.shell, [argv0], env)
             except OSError:
                 os._exit(127)
         self.pid = pid
@@ -174,6 +206,16 @@ class PtySession:
             fcntl.ioctl(self._fd, termios.TIOCSWINSZ, winsize)
         except OSError:
             pass
+
+    def foreground_pgid(self) -> int | None:
+        """The terminal's foreground process group — the shell's own pid while it sits at
+        a prompt, a job's group while a program runs. None when unknown."""
+        if self._fd is None:
+            return None
+        try:
+            return os.tcgetpgrp(self._fd)
+        except OSError:
+            return None
 
     def poll(self) -> int | None:
         """The child's exit code if it has exited (reaped non-blocking), else None."""
@@ -262,9 +304,10 @@ class PtySession:
 
 
 class WinPtySession:
-    """Windows backend via the optional ``pywinpty`` package — EXPERIMENTAL (untested
-    in our Linux CI; needs a Windows validator). Same interface as ``PtySession``,
-    but on top of ``winpty.PtyProcess`` (method-based read/write, not an fd)."""
+    """Windows backend via the optional ``pywinpty`` package, validated by the CI windows
+    job. Same interface as ``PtySession``, but on top of ``winpty.PtyProcess``
+    (method-based read/write, not an fd). No ``foreground_pgid`` (no POSIX job control),
+    and ``login`` is accepted but meaningless here."""
 
     def __init__(
         self,
@@ -275,6 +318,7 @@ class WinPtySession:
         rows: int = 24,
         env_overrides: dict[str, str] | None = None,
         scrub_env: list[str] | None = None,
+        login: bool = False,  # POSIX-only concept; accepted for a uniform interface
     ):
         self.shell = shell or os.environ.get("COMSPEC") or "cmd.exe"
         self.cwd, self.cwd_notice = resolve_cwd(cwd)

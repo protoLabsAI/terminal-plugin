@@ -1,6 +1,6 @@
 id: terminal
 name: Terminal
-version: 0.5.2
+version: 0.9.0
 description: >-
   A full terminal in the protoAgent console — an xterm.js view wired to a real PTY
   shell over a WebSocket. The terminal is themed from the protoAgent design system
@@ -11,10 +11,10 @@ description: >-
   always loopback-local. (Disable it explicitly if you don't want a terminal.)
 enabled: true
 repository: https://github.com/protoLabsAI/terminal-plugin
-min_protoagent_version: "0.82.0"   # views (ADR 0026) + WS-through-proxy (#883) + live_config + background mount (#1640)
+min_protoagent_version: "0.148.0"  # views, WS-through-proxy (#883), live_config, background mount (#1640), keydown forwarding (0.117), plugin context menus (#3030, 0.148)
 
-# Linux/macOS use the stdlib PTY (no deps). Windows is EXPERIMENTAL (untested in CI)
-# and needs pywinpty — declared, NOT auto-installed (install-deps it on Windows).
+# Linux/macOS use the stdlib PTY (no deps). Windows needs pywinpty (validated in CI on a
+# real cmd.exe) — declared, NOT auto-installed (install-deps it on Windows).
 requires_pip:
   - "pywinpty>=2.0; sys_platform == 'win32'"
 
@@ -26,6 +26,12 @@ config:
   font_size: 13             # xterm font size (px)
   keep_alive_minutes: 30    # a shell with no attached view survives this long (0 = end it on disconnect)
   max_sessions: 12          # live shells allowed at once (across every open console)
+  login_shell: true         # start the shell as a login shell (reads ~/.zprofile etc — PATH like your usual terminal)
+  font_family: ""           # blank → the console's mono font, then Menlo/Monaco
+  cursor_style: block       # block | bar | underline
+  option_as_meta: false     # macOS: Option sends Meta (Alt+b/f word-jumps) instead of typing ∑/ƒ/…
+  copy_on_select: false     # copy a selection to the clipboard as soon as it's made
+  agent_access: run         # off | read (list/read tabs) | run (+ run commands in, and open, tabs)
   # auth_token is NOT configured here — the WS verifies the connecting token against
   # the host's operator bearer (config auth.token / A2A_AUTH_TOKEN). When the host has
   # no bearer set (loopback dev), the WS is open on the bound interface — only enable
@@ -40,6 +46,12 @@ settings:
   - { key: scrollback, label: "Scrollback (lines)", type: number, description: "Lines of history each terminal keeps. Applies when the view next loads." }
   - { key: keep_alive_minutes, label: "Keep detached shells (minutes)", type: number, description: "How long a shell keeps running with no terminal attached (view closed, reload, network drop) before it is ended. 0 ends it on disconnect." }
   - { key: max_sessions, label: "Max open shells", type: number, description: "Live shells allowed at once, across every open console." }
+  - { key: login_shell, label: "Login shell", type: bool, description: "Start shells as login shells, so ~/.zprofile / ~/.bash_profile run and PATH matches your usual terminal. Applies to new shells." }
+  - { key: font_family, label: "Font family", type: string, description: "A CSS font list, e.g. \"JetBrains Mono, Menlo\". Blank uses the console's monospace font. Applies when the view next loads." }
+  - { key: cursor_style, label: "Cursor style", type: select, options: [block, bar, underline], description: "The cursor shape. Applies when the view next loads." }
+  - { key: option_as_meta, label: "Option as Meta (macOS)", type: bool, description: "Option sends Meta, so Option+B/F jump words in the shell. Off: Option types special characters (∑, ƒ, #…). Applies when the view next loads." }
+  - { key: copy_on_select, label: "Copy on select", type: bool, description: "Copy a selection to the clipboard as soon as you make it (X11/iTerm style)." }
+  - { key: agent_access, label: "Agent access", type: select, options: [run, read, "off"], description: "What the agent may do with your terminals. run: read them, and run commands visibly in its own Agent tab (or one you name), and open tabs for you. read: only list and read them (e.g. \"what's this error?\"). off: nothing. Terminal output you let it read goes to your model gateway. Applies immediately." }
 
 # Console view (ADR 0026) — a left-rail icon whose panel iframes the terminal page.
 # Served on the PUBLIC /plugins/<id> prefix (an iframe page-load can't carry a bearer);
@@ -55,6 +67,10 @@ views:
 # WS does its own bearer check.)
 public_paths:
   - "/plugins/terminal/static/"
+
+# Bus topics (ADR 0039). The view subscribes to terminal.# to add tabs the agent opens.
+emits:
+  - terminal.session_opened   # {session, name, focus} — a tool opened a terminal tab
 
 # Declarative transparency (surfaced in the console; not enforced).
 capabilities:

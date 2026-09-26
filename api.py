@@ -26,8 +26,8 @@ live shell (replaying its buffered output); none/unknown spawns a new one. A dro
 socket only detaches; ``{type:"close"}`` kills the shell.
 
 Wire protocol (JSON, modelled on protoMaker's terminal):
-  client → server: {auth, ticket|token, session?, cols?, rows?} · {input, data} ·
-                   {resize, cols, rows} · {ping} · {close}
+  client → server: {auth, ticket|token, session?, cols?, rows?, cwd_from?} · {input, data} ·
+                   {resize, cols, rows} · {ping} · {focus} · {close}
   server → client: {connected, session, shell, cwd, resumed} · {data, data} ·
                    {exit, exitCode} · {detached, reason} · {error, message} · {pong}
 """
@@ -45,6 +45,7 @@ from pathlib import Path
 
 from fastapi import WebSocket  # module-level so the websocket route's annotation resolves
 
+from .procinfo import cwd_of
 from .sessions import MANAGER, SessionLimitError
 from .view import PAGE
 
@@ -60,16 +61,33 @@ DEFAULTS = {
     "font_size": 13,
     "keep_alive_minutes": 30,
     "max_sessions": 12,
+    "login_shell": True,
+    "font_family": "",
+    "cursor_style": "block",
+    "option_as_meta": False,
+    "copy_on_select": False,
+    "agent_access": "run",
 }
+AGENT_ACCESS = ("off", "read", "run")
+CURSOR_STYLES = ("block", "bar", "underline")
 
-# Vendored xterm assets served locally (offline — no CDN). Whitelisted by name.
-_VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
-_VENDOR_TYPES = {
-    "xterm.js": "application/javascript",
-    "xterm.css": "text/css",
-    "addon-fit.js": "application/javascript",
-    "addon-web-links.js": "application/javascript",
-    "addon-canvas.js": "application/javascript",
+# Static files served locally (offline — no CDN), WHITELISTED by name → (dir, media type):
+# the vendored xterm bundles + the view's own ES modules. No path ever reaches the disk
+# unless it is a key here, so traversal shapes simply 404.
+_ROOT = Path(__file__).resolve().parent
+_JS = "text/javascript"
+_STATIC = {
+    "xterm.js": (_ROOT / "vendor", _JS),
+    "xterm.css": (_ROOT / "vendor", "text/css"),
+    "addon-fit.js": (_ROOT / "vendor", _JS),
+    "addon-web-links.js": (_ROOT / "vendor", _JS),
+    "addon-canvas.js": (_ROOT / "vendor", _JS),
+    "addon-webgl.js": (_ROOT / "vendor", _JS),
+    "addon-search.js": (_ROOT / "vendor", _JS),
+    "addon-unicode11.js": (_ROOT / "vendor", _JS),
+    "terminal.js": (_ROOT / "web", _JS),
+    "logic.js": (_ROOT / "web", _JS),
+    "layout.js": (_ROOT / "web", _JS),
 }
 
 
@@ -163,13 +181,32 @@ def resolve(cfg: dict | None) -> dict:
         "font_size": _num(raw["font_size"], DEFAULTS["font_size"], 8, 32),
         "keep_alive_minutes": _num(raw["keep_alive_minutes"], DEFAULTS["keep_alive_minutes"], 0, 7 * 24 * 60),
         "max_sessions": _num(raw["max_sessions"], DEFAULTS["max_sessions"], 1, 64),
+        "login_shell": _bool(raw["login_shell"]),
+        "font_family": str(raw["font_family"] or "").strip(),
+        "cursor_style": raw["cursor_style"] if raw["cursor_style"] in CURSOR_STYLES else DEFAULTS["cursor_style"],
+        "option_as_meta": _bool(raw["option_as_meta"]),
+        "copy_on_select": _bool(raw["copy_on_select"]),
+        "agent_access": raw["agent_access"] if raw["agent_access"] in AGENT_ACCESS else DEFAULTS["agent_access"],
     }
 
 
+def _bool(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def render_page(cfg: dict) -> str:
-    """The view page with the client-side config baked in (font size + scrollback), so
-    a Settings change shows up on the next view load."""
-    client = {"fontSize": cfg["font_size"], "scrollback": cfg["scrollback"]}
+    """The view page with the client-side config baked in, so a Settings change shows up
+    on the next view load."""
+    client = {
+        "fontSize": cfg["font_size"],
+        "scrollback": cfg["scrollback"],
+        "fontFamily": cfg["font_family"],
+        "cursorStyle": cfg["cursor_style"],
+        "optionAsMeta": cfg["option_as_meta"],
+        "copyOnSelect": cfg["copy_on_select"],
+    }
     # json.dumps output is safe inside <script> once "</" can't close the tag.
     return PAGE.replace("__TERMINAL_CONFIG__", json.dumps(client).replace("</", "<\\/"))
 
@@ -196,12 +233,13 @@ def build_router(cfg):
 
     @router.get("/static/{name}")
     async def _static(name: str):
-        # Vendored xterm assets (offline). Whitelisted — no path traversal.
-        media = _VENDOR_TYPES.get(name)
-        path = _VENDOR_DIR / name
-        if media is None or not path.is_file():
+        # Whitelisted by name — no path traversal. `no-cache` = revalidate every load
+        # (cheap: FileResponse sends ETag/Last-Modified), so a plugin upgrade never runs
+        # stale JS against a new server.
+        entry = _STATIC.get(name)
+        if entry is None or not (entry[0] / name).is_file():
             raise HTTPException(404)
-        return FileResponse(path, media_type=media)
+        return FileResponse(entry[0] / name, media_type=entry[1], headers={"Cache-Control": "no-cache"})
 
     @router.websocket("/ws")
     async def _ws(ws: WebSocket):
@@ -224,7 +262,9 @@ def build_router(cfg):
 def build_api_router():
     """The GATED router — mount under ``/api/plugins/terminal``. The host's operator-bearer
     middleware covers every ``/api/plugins/*`` HTTP route, so only an authenticated
-    console (or, on a fleet member, the hub forwarding with the fleet token) mints."""
+    console (or, on a fleet member, the hub forwarding with the fleet token) reaches it:
+    the single-use WS-ticket mint, and the session list a view that loads after a tool
+    opened a tab uses to adopt that tab."""
     from fastapi import APIRouter
     from fastapi.responses import JSONResponse
 
@@ -233,6 +273,21 @@ def build_api_router():
     @router.post("/ticket")
     async def _ticket():
         return JSONResponse({"ticket": mint_ticket(), "ttl": TICKET_TTL}, headers={"Cache-Control": "no-store"})
+
+    @router.get("/sessions")
+    async def _sessions():
+        return {
+            "sessions": [
+                {
+                    "id": s.id,
+                    "name": s.name,
+                    "origin": s.origin,
+                    "pending_adopt": s.pending_adopt,
+                    "attached": s.attached,
+                }
+                for s in MANAGER.list()
+            ]
+        }
 
     return router
 
@@ -258,10 +313,18 @@ async def _bridge(ws, hello: dict, conf) -> None:
     sess = MANAGER.get(str(hello.get("session") or ""))
     resumed = sess is not None
     if sess is None:
+        cwd = cfg["cwd"]
+        # A split pane starts where the pane it split from is (its shell's live cwd).
+        source = MANAGER.get(str(hello.get("cwd_from") or ""))
+        if source is not None and source.pty.pid:
+            here = await asyncio.to_thread(cwd_of, source.pty.pid)
+            if here and os.path.isdir(here):
+                cwd = here
         try:
             sess = MANAGER.create(
                 shell=cfg["shell"],
-                cwd=cfg["cwd"],
+                cwd=cwd,
+                login=cfg["login_shell"],
                 cols=_num(hello.get("cols"), 80, 1, 1000),
                 rows=_num(hello.get("rows"), 24, 1, 1000),
                 scrub_env=scrub_keys(),
@@ -292,6 +355,9 @@ async def _bridge(ws, hello: dict, conf) -> None:
                 sess.resize(_num(msg.get("cols"), 80, 1, 1000), _num(msg.get("rows"), 24, 1, 1000))
             elif kind == "ping":
                 queue.put_nowait({"type": "pong"})
+            elif kind == "focus":
+                # The view is showing this tab — "active" for the agent's terminal_read.
+                sess.focused_at = time.monotonic()
             elif kind == "close":
                 killed = True
                 break

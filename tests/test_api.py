@@ -121,6 +121,32 @@ def test_view_reads_config_live_through_a_callable():
     assert '"fontSize": 19' in c.get("/plugins/terminal/view").text
 
 
+def test_resolve_normalizes_the_daily_driver_keys():
+    r = api.resolve(
+        {"cursor_style": "sparkle", "login_shell": "false", "option_as_meta": "yes", "font_family": "  Fira Code "}
+    )
+    assert r["cursor_style"] == "block" and r["login_shell"] is False and r["option_as_meta"] is True
+    assert r["font_family"] == "Fira Code"
+    assert api.resolve({})["login_shell"] is True  # login shells by default
+
+
+def test_view_carries_every_client_setting():
+    r = TestClient(
+        _app({"cursor_style": "bar", "option_as_meta": True, "copy_on_select": True, "font_family": "Iosevka"})
+    )
+    html = r.get("/plugins/terminal/view").text
+    for frag in ('"cursorStyle": "bar"', '"optionAsMeta": true', '"copyOnSelect": true', '"fontFamily": "Iosevka"'):
+        assert frag in html
+
+
+def test_app_modules_are_served_and_revalidated():
+    c = TestClient(_app())
+    for name in ("terminal.js", "logic.js", "addon-webgl.js", "addon-search.js", "addon-unicode11.js"):
+        r = c.get("/plugins/terminal/static/" + name)
+        assert r.status_code == 200 and "javascript" in r.headers["content-type"], name
+        assert r.headers["cache-control"] == "no-cache"  # an upgrade never runs stale JS
+
+
 def test_resolve_fills_defaults_and_clamps():
     r = api.resolve({"font_size": 999, "scrollback": "junk", "keep_alive_minutes": -5, "shell": ""})
     assert r["font_size"] == 32 and r["scrollback"] == api.DEFAULTS["scrollback"]
@@ -130,7 +156,7 @@ def test_resolve_fills_defaults_and_clamps():
 
 def test_render_page_cannot_be_broken_out_of_the_script_tag(monkeypatch):
     monkeypatch.setattr(api, "PAGE", "<script>var C = __TERMINAL_CONFIG__;</script>")
-    out = api.render_page({"font_size": 13, "scrollback": 5000})
+    out = api.render_page({**api.resolve({}), "font_family": "</script><script>alert(1)"})
     assert out.count("</script>") == 1
 
 
@@ -252,6 +278,20 @@ def test_a_dropped_socket_detaches_and_reattach_replays(client, _fresh_manager):
         _read_until(ws, "before_drop")  # the replay of what it printed earlier
         ws.send_json({"type": "input", "data": "after_reattach\n"})
         _read_until(ws, "after_reattach")  # and it is the same live shell
+
+
+def test_a_split_starts_in_the_source_panes_cwd(client, tmp_path):
+    import os
+
+    c = client({"shell": "/bin/sh", "login_shell": False})
+    with c.websocket_connect("/plugins/terminal/ws") as a:
+        src = _auth(a)["session"]
+        a.send_json({"type": "input", "data": f"cd {tmp_path} && echo moved_ok\n"})
+        _read_until(a, "moved_ok\r")
+        with c.websocket_connect("/plugins/terminal/ws") as b:
+            b.send_json({"type": "auth", "token": "", "cwd_from": src})
+            m = b.receive_json()
+            assert m["type"] == "connected" and os.path.realpath(m["cwd"]) == os.path.realpath(str(tmp_path))
 
 
 def test_an_unknown_session_gets_a_fresh_shell(client):
@@ -384,6 +424,49 @@ def test_the_shell_exiting_reports_and_forgets_the_session(client, _fresh_manage
         else:
             raise AssertionError("no exit frame")
     assert _fresh_manager.get(sid) is None
+
+
+# ── the gated session list (a view adopts agent-opened tabs from it) ────────────
+
+
+def test_sessions_list_shape_and_pending_adoption(_fresh_manager):
+    """GET /api/plugins/terminal/sessions — lives under /api/plugins/… so the HOST's
+    default-deny bearer middleware gates it (not this router)."""
+    app = FastAPI()
+    app.include_router(api.build_api_router(), prefix="/api/plugins/terminal")
+    with TestClient(app) as c:
+        assert c.get("/api/plugins/terminal/sessions").json() == {"sessions": []}
+        s = c.portal.call(_create, _fresh_manager, {"name": "Agent", "origin": "agent", "pending_adopt": True})
+        got = c.get("/api/plugins/terminal/sessions").json()["sessions"]
+        assert got == [{"id": s.id, "name": "Agent", "origin": "agent", "pending_adopt": True, "attached": False}]
+        # an exited session drops off the list
+        c.portal.call(_fresh_manager.close, s.id)
+        assert c.get("/api/plugins/terminal/sessions").json() == {"sessions": []}
+
+
+def test_attaching_clears_pending_adoption(_fresh_manager):
+    app = FastAPI()
+    app.include_router(api.build_router({"shell": "/bin/cat"}), prefix="/plugins/terminal")
+    app.include_router(api.build_api_router(), prefix="/api/plugins/terminal")
+    with TestClient(app) as c:
+        s = c.portal.call(_create, _fresh_manager, {"shell": "/bin/cat", "pending_adopt": True})
+        with c.websocket_connect("/plugins/terminal/ws") as ws:
+            assert _auth(ws, session=s.id)["resumed"] is True
+            [row] = c.get("/api/plugins/terminal/sessions").json()["sessions"]
+            assert row["pending_adopt"] is False and row["attached"] is True
+        c.portal.call(_fresh_manager.close_all)
+
+
+async def _create(mgr, kw):
+    return mgr.create(**{"shell": "/bin/cat", **kw})
+
+
+def test_the_api_router_is_mounted_under_the_gated_prefix(registry):
+    import terminal
+
+    terminal.register(registry)
+    # /api/plugins/<id> is default-deny (bearer) in the host; /plugins/<id> is public
+    assert "/api/plugins/terminal" in registry.routers
 
 
 # ── single-use tickets (the fleet-member path) ───────────────────────────────────

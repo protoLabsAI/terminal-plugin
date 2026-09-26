@@ -14,8 +14,10 @@ from terminal.pty_session import (
     WinPtySession,
     default_shell,
     home_dir,
+    login_argv0,
     open_session,
     resolve_cwd,
+    utf8_locale,
 )
 
 
@@ -131,13 +133,81 @@ def test_winpty_build_env_and_missing_dep():
         s.start()
 
 
+# ── daily-driver env: login shell + UTF-8 ───────────────────────────────────────
+
+
+def test_login_argv0_is_the_dashed_basename():
+    assert login_argv0("/bin/zsh") == "-zsh"
+    assert login_argv0("/opt/homebrew/bin/fish") == "-fish"
+
+
+def test_a_non_utf8_lc_all_or_lc_ctype_is_overridden_too():
+    # LC_ALL wins over LANG in POSIX resolution — filling LANG alone would be shadowed
+    out = utf8_locale({"LC_ALL": "C", "LANG": "C"})
+    assert "UTF-8" in out["LC_ALL"] and "UTF-8" in out["LANG"]
+    out = utf8_locale({"LC_CTYPE": "POSIX"})
+    assert "UTF-8" in out["LC_CTYPE"] and "LC_ALL" not in out
+
+
+@pytest.mark.parametrize(
+    "env,expect_fill",
+    [
+        ({}, True),  # launched from a GUI: no locale at all
+        ({"LANG": "C"}, True),
+        ({"LANG": "en_US.UTF-8"}, False),
+        ({"LANG": "C", "LC_ALL": "de_DE.utf8"}, False),
+        ({"LC_CTYPE": "UTF-8"}, False),
+    ],
+)
+def test_utf8_locale_only_fills_a_gap(env, expect_fill):
+    out = utf8_locale(env)
+    assert bool(out) is expect_fill
+    if out:
+        assert "UTF-8" in out["LANG"]
+
+
+async def test_a_login_shell_reports_a_dashed_argv0():
+    sess = PtySession(shell="/bin/sh", login=True)
+    sess.start()
+    try:
+        sess.write("echo zero=[$0]\n")
+        out = (await _read_until(sess, "zero=[-sh]")).decode("utf-8", "replace")
+        assert "zero=[-sh]" in out
+    finally:
+        await sess.aclose()
+
+
+async def test_a_non_login_shell_keeps_its_path_as_argv0():
+    sess = PtySession(shell="/bin/sh", login=False)
+    sess.start()
+    try:
+        sess.write("echo zero=[$0]\n")
+        out = (await _read_until(sess, "zero=[/bin/sh]")).decode("utf-8", "replace")
+        assert "zero=[/bin/sh]" in out
+    finally:
+        await sess.aclose()
+
+
+async def test_the_shell_gets_a_utf8_locale_when_the_server_has_none(monkeypatch):
+    for k in ("LANG", "LC_ALL", "LC_CTYPE"):
+        monkeypatch.delenv(k, raising=False)
+    sess = PtySession(shell="/bin/sh")
+    sess.start()
+    try:
+        sess.write("echo lang=[$LANG]\n")
+        out = (await _read_until(sess, "UTF-8]")).decode("utf-8", "replace")
+        assert "UTF-8]" in out
+    finally:
+        await sess.aclose()
+
+
 async def test_closing_a_shell_with_unread_output_never_hangs():
     """Regression: on macOS a process exiting with unread tty output blocks in exit()
     until the master drains it. aclose() used to SIGKILL then block in waitpid() with
     nobody reading — a permanent hang. It must drain while it waits."""
     import time
 
-    sess = PtySession(shell="/bin/sh")
+    sess = PtySession(shell="/bin/sh", login=True)
     sess.start()
     try:
         sess.write("yes flood_flood_flood_flood\n")  # floods the pty; we never read it
