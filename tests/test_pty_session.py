@@ -327,3 +327,7 @@ def test_display_path_is_home_relative():
     assert display_path(home.rstrip("/") + "x") == home.rstrip("/") + "x"  # a sibling, not under home
     assert display_path("/tmp") == "/tmp"
     assert display_path("") == ""
+    # dot-components / doubled separators are normalized before the prefix is cut
+    assert display_path(home + "/./dev//app") == "~/dev/app"
+    assert display_path(home + "/dev/../dev/app") == "~/dev/app"
+    assert display_path(home + "/.") == "~"

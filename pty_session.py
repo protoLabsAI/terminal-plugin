@@ -85,17 +85,21 @@ def display_path(path: str) -> str:
     shells print in their titles — else the path as-is."""
     if not path:
         return ""
-    home = home_dir()
     try:
-        norm, h = _ospath.normcase(_ospath.normpath(path)), _ospath.normcase(_ospath.normpath(home))
+        # Normalize FIRST and work on the normalized forms throughout — slicing the raw
+        # path by the home prefix's length breaks on "./" / "../" / doubled separators.
+        clean = _ospath.normpath(path)
+        home = _ospath.normpath(home_dir())
     except (TypeError, ValueError):
         return path
+    norm, h = _ospath.normcase(clean), _ospath.normcase(home)
     if norm == h:
         return "~"
     sep = _ospath.sep
-    if norm.startswith(h.rstrip(sep) + sep):
-        return "~" + sep + path[len(home.rstrip(sep)) + 1 :]
-    return path
+    prefix = h.rstrip(sep) + sep
+    if norm.startswith(prefix):
+        return "~" + sep + clean[len(prefix) :]
+    return clean
 
 
 def resolve_cwd(cwd: str = "") -> tuple[str, str]:
