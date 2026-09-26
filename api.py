@@ -46,6 +46,7 @@ from pathlib import Path
 from fastapi import WebSocket  # module-level so the websocket route's annotation resolves
 
 from .procinfo import cwd_of
+from .pty_session import display_path, resolve_cwd
 from .sessions import MANAGER, SessionLimitError
 from .view import PAGE
 
@@ -206,6 +207,9 @@ def render_page(cfg: dict) -> str:
         "cursorStyle": cfg["cursor_style"],
         "optionAsMeta": cfg["option_as_meta"],
         "copyOnSelect": cfg["copy_on_select"],
+        # Where a new tab's shell will start, as its label from the first frame — so a new
+        # tab reads "~" at once instead of flashing "Terminal N" until the shell titles it.
+        "startDir": display_path(resolve_cwd(cfg["cwd"])[0]),
     }
     # json.dumps output is safe inside <script> once "</" can't close the tag.
     return PAGE.replace("__TERMINAL_CONFIG__", json.dumps(client).replace("</", "<\\/"))
@@ -340,7 +344,9 @@ async def _bridge(ws, hello: dict, conf) -> None:
             return
 
     queue: asyncio.Queue = asyncio.Queue()
-    sess.attach(queue, resumed=resumed)
+    # Label the tab by the shell's LIVE cwd (it may have cd'd since it started).
+    here = await asyncio.to_thread(cwd_of, sess.pty.pid) if getattr(sess.pty, "pid", None) else ""
+    sess.attach(queue, resumed=resumed, label=display_path(here) if here else "")
     writer = asyncio.create_task(_write_out(ws, queue))
     killed = False
     try:

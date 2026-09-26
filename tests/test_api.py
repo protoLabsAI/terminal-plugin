@@ -597,3 +597,31 @@ def test_tickets_are_never_logged(monkeypatch, caplog, gated):
         ws.send_json({"type": "auth", "ticket": ticket})
         ws.receive_json()
     assert ticket not in caplog.text
+
+
+# ── tab labels: never flash "Terminal N" ────────────────────────────────────────
+
+
+def test_the_page_knows_the_start_dir_label():
+    html = TestClient(_app({"shell": "/bin/cat"})).get("/plugins/terminal/view").text
+    assert '"startDir": "~"' in html  # blank cwd → home → "~"
+
+
+def test_connected_labels_the_tab_with_the_live_cwd(client, tmp_path):
+    import os
+
+    from terminal.pty_session import display_path
+
+    c = client({"shell": "/bin/sh", "login_shell": False})
+    with c.websocket_connect("/plugins/terminal/ws") as ws:
+        m = _auth(ws)
+        assert m["label"] == "~"  # a new shell starts at home
+        sid = m["session"]
+        ws.send_json({"type": "input", "data": f"cd {tmp_path} && echo moved_ok\n"})
+        _read_until(ws, "moved_ok\r")
+    with c.websocket_connect("/plugins/terminal/ws") as ws:
+        m = _auth(ws, session=sid)
+        # reattaching reports where the shell IS now, not where it started
+        assert os.path.realpath(os.path.expanduser(m["label"])) == os.path.realpath(str(tmp_path)) or m[
+            "label"
+        ] == display_path(os.path.realpath(str(tmp_path)))

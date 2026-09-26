@@ -80,6 +80,24 @@ def home_dir() -> str:
     return os.getcwd()
 
 
+def display_path(path: str) -> str:
+    """A path as a tab label: under home it's ``~``-relative ("~", "~/dev/app") — what
+    shells print in their titles — else the path as-is."""
+    if not path:
+        return ""
+    home = home_dir()
+    try:
+        norm, h = _ospath.normcase(_ospath.normpath(path)), _ospath.normcase(_ospath.normpath(home))
+    except (TypeError, ValueError):
+        return path
+    if norm == h:
+        return "~"
+    sep = _ospath.sep
+    if norm.startswith(h.rstrip(sep) + sep):
+        return "~" + sep + path[len(home.rstrip(sep)) + 1 :]
+    return path
+
+
 def resolve_cwd(cwd: str = "") -> tuple[str, str]:
     """Where a new shell starts, plus a one-line notice ('' when none).
 

@@ -116,6 +116,14 @@ def test_renaming_a_tab_cannot_change_the_layout():
     assert "#terms{position:relative;flex:1 1 auto;min-height:0;overflow:hidden}" in PAGE
 
 
+def test_new_tabs_never_flash_a_placeholder_name():
+    app = _app_js()
+    assert 'name || CFG.startDir || "Terminal "' in app  # named by the start dir from frame one
+    assert "if (!p.title && m.label)" in app  # then the server's live-cwd label
+    assert "fresh.title = from.title" in app  # a split inherits its source pane's title
+    assert "titles:" in app  # last-seen titles survive a reload
+
+
 def test_view_integrates_with_the_console():
     from terminal.view import PAGE
 

@@ -28,7 +28,7 @@ import secrets
 import time
 from collections import deque
 
-from .pty_session import open_session
+from .pty_session import display_path, open_session
 from .textutil import alt_screen_after
 
 log = logging.getLogger("protoagent.plugins.terminal")
@@ -162,7 +162,7 @@ class Session:
             self._viewer.put_nowait(msg)
 
     # ── viewers ──────────────────────────────────────────────────────────────────
-    def attach(self, queue: asyncio.Queue, *, resumed: bool) -> None:
+    def attach(self, queue: asyncio.Queue, *, resumed: bool, label: str = "") -> None:
         """Make ``queue`` THE viewer: kick any previous one, enqueue ``connected`` +
         the replay, then live output. Synchronous — nothing can interleave."""
         if self._viewer is not None and self._viewer is not queue:
@@ -184,6 +184,8 @@ class Session:
             "resumed": resumed,
             "name": self.name,
             "origin": self.origin,
+            # What to call the tab until the shell titles itself: the (live) cwd, ~-relative.
+            "label": label or display_path(self.cwd),
         }
         notice = getattr(self.pty, "cwd_notice", "")
         if notice and not resumed:  # e.g. the configured starting directory is missing

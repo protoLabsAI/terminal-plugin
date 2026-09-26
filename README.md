@@ -144,7 +144,7 @@ runtime-status without a console rebuild (#853). No restart.
 Or from the CLI against a running server:
 
 ```bash
-python -m server plugin install https://github.com/protoLabsAI/terminal-plugin --ref v0.9.0
+python -m server plugin install https://github.com/protoLabsAI/terminal-plugin --ref v0.9.1
 # then pick it up live: hit "Sync" in the console Plugins panel, or have the agent call
 # reload_plugins (plugin-devkit). It hot-mounts — no restart.
 ```
