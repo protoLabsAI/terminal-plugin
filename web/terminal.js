@@ -8,7 +8,7 @@
 // the view stays mounted while hidden, remembers tabs + layouts across reloads, and
 // reattaches (replaying missed output) after a drop. Closing a pane or tab ends its shells.
 
-import { keyAction, buildTheme, tabLabel, clampFont } from "./logic.js";
+import { keyAction, buildTheme, tabLabel, clampFont, authCredential } from "./logic.js";
 import { leaf, panesOf, split, remove, neighbor, resize, mapPanes, validate } from "./layout.js";
 
 const IS_MAC = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
@@ -302,12 +302,19 @@ export function boot({ kit, BASE, CFG, xt }) {
     const ticket = await fetchTicket();
     if (gen !== p.gen || p.closing) return;
     if (ticket === "denied") return setS(p, "unauthorized", "bad");
+    // Through the fleet proxy only a ticket may authenticate (see authCredential) — with
+    // none, retry the mint rather than send the hub's own token down the socket.
+    const cred = authCredential({ ticket, base: BASE, token: kit.getToken && kit.getToken() });
+    if (!cred) {
+      const delay = Math.min(10000, 500 * Math.pow(2, p.retry++));
+      setS(p, "no session ticket — retrying…", "");
+      p.retryTimer = setTimeout(() => connect(p), delay);
+      return;
+    }
     const ws = new WebSocket(wsUrl());
     p.ws = ws;
     ws.onopen = () => {
-      const hello = { type: "auth", session: p.sessionId || null, cols: p.term.cols, rows: p.term.rows, cwd_from: p.cwdFrom || null };
-      if (ticket) hello.ticket = ticket;
-      else hello.token = (kit.getToken && kit.getToken()) || "";   // direct-connection fallback
+      const hello = { type: "auth", session: p.sessionId || null, cols: p.term.cols, rows: p.term.rows, cwd_from: p.cwdFrom || null, ...cred };
       ws.send(JSON.stringify(hello));
       p.cwdFrom = null;   // only a brand-new shell starts "where the other pane is"
     };

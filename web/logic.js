@@ -183,3 +183,17 @@ export const clampFont = (n, fallback = 13) => {
   const v = Math.round(Number(n));
   return Number.isFinite(v) ? Math.max(8, Math.min(32, v)) : fallback;
 };
+
+// ── auth frame ──────────────────────────────────────────────────────────────────
+// The credential the socket's first frame carries, or null when the view must NOT send one.
+// A ticket is always preferred: it is single-use and was minted over the host's gated HTTP
+// route (through the fleet hub, that route is re-authenticated for the member). The raw
+// operator token is only a fallback for a DIRECT connection. Behind the fleet proxy
+// (BASE = /agents/<slug>) it is the HUB's credential: a member can't verify it, and on a
+// REMOTE member it would hand the hub's token to another machine (ADR 0113 D6), since the
+// hub cannot rewrite what travels inside a socket. So there: no ticket, no credential.
+export function authCredential({ ticket, base, token }) {
+  if (ticket) return { ticket };
+  if (/^\/agents\/[^/]+/.test(base || "")) return null;
+  return { token: token || "" };
+}
