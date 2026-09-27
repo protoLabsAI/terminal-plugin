@@ -62,7 +62,9 @@ def test_view_page_pulls_in_the_protoagent_theme_and_four_rules():
     # fleet hub, which swaps the operator bearer for the member's fleet token) — fresh
     # per connect, with the in-band token only as the direct-connection fallback.
     assert "/api/plugins/terminal/ticket" in app and "kit.apiFetch" in app
-    assert "hello.ticket = ticket" in app and "hello.token =" in app
+    # the credential comes from authCredential (web/logic.js), which refuses the raw token behind
+    # the fleet proxy — tested in tests/js/logic.test.mjs
+    assert "authCredential({ ticket, base: BASE" in app and "...cred" in app
     assert "const ticket = await fetchTicket()" in app
     # the standalone shim can still mint (apiFetch falls back to a same-origin fetch)
     assert "apiFetch(p, i){ return fetch(BASE + p, i); }" in PAGE

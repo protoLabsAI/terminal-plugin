@@ -128,3 +128,23 @@ test("clampFont keeps the Settings range", () => {
   assert.equal(clampFont("14"), 14);
   assert.equal(clampFont("junk", 13), 13);
 });
+
+// ── auth frame: never send the hub's token down a fleet-proxied socket (ADR 0113 D6) ──
+import { authCredential } from "../../web/logic.js";
+
+test("a ticket is always what the auth frame carries when there is one", () => {
+  assert.deepEqual(authCredential({ ticket: "t1", base: "/agents/ava-1a2b", token: "op" }), { ticket: "t1" });
+  assert.deepEqual(authCredential({ ticket: "t1", base: "", token: "op" }), { ticket: "t1" });
+});
+
+test("a direct connection may fall back to the operator token", () => {
+  assert.deepEqual(authCredential({ ticket: null, base: "", token: "op" }), { token: "op" });
+  assert.deepEqual(authCredential({ ticket: null, base: undefined, token: undefined }), { token: "" });
+});
+
+test("behind the fleet proxy with no ticket, no credential is sent at all", () => {
+  // /agents/<slug> is the hub's proxy: the token here is the HUB's, and a remote member
+  // would receive it inside the socket, where the hub cannot swap it.
+  assert.equal(authCredential({ ticket: null, base: "/agents/ava-1a2b", token: "op" }), null);
+  assert.equal(authCredential({ ticket: "", base: "/agents/r-remote/", token: "op" }), null);
+});
