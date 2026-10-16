@@ -3,3 +3,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+
+# coding-agent per-session scratch
+.proto/memory/
+.proto/session-notes.md
+.proto/repo-map-cache.json
