@@ -8,6 +8,7 @@ where `make` is on PATH, uses `make -n` (dry run — nothing executes) to confir
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -105,14 +106,29 @@ def test_gate_expands_to_exactly_the_ci_commands_in_order():
 @pytest.mark.skipif(shutil.which("make") is None, reason="make not on PATH")
 def test_make_dry_run_emits_the_ci_commands_in_order():
     # `make -n` prints the recipe it *would* run without executing anything.
+    #
+    # This test may itself run under `make gate`/`make test` (the very workflow this
+    # Makefile introduces). A child make then inherits MAKELEVEL/MAKEFLAGS from the
+    # parent, treats itself as a sub-make, and auto-enables --print-directory — spraying
+    # `make[1]: Entering/Leaving directory` lines onto stdout that would break the exact
+    # match below. Scrub the inherited make vars from the child env AND pass
+    # --no-print-directory so the dry run emits only the recipe commands, regardless of
+    # whether a parent make is present; belt-and-suspenders, also drop any residual
+    # `make[...]:`/`make:` directory lines (none of the CI commands start with "make").
+    env = {k: v for k, v in os.environ.items() if k not in {"MAKELEVEL", "MAKEFLAGS", "MFLAGS"}}
     out = subprocess.run(
-        ["make", "-n", "gate"],
+        ["make", "--no-print-directory", "-n", "gate"],
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=True,
+        env=env,
     ).stdout
-    emitted = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    emitted = [
+        ln.strip()
+        for ln in out.splitlines()
+        if ln.strip() and not re.match(r"^make(\[\d+\])?:", ln.strip())
+    ]
     assert emitted == CI_COMMANDS
 
 
