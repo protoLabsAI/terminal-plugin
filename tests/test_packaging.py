@@ -187,3 +187,76 @@ def test_register_mounts_the_public_router(registry):
     # the WS-ticket mint rides the host's bearer-gated /api/plugins/* prefix
     assert "/api/plugins/terminal" in registry.routers
     assert "terminal-sessions" in registry.surfaces  # shells are ended on shutdown
+
+
+# --- coder grounding doc (PROTO.md) + its pointers ----------------------------
+
+
+def _proto():
+    return (ROOT / "PROTO.md").read_text()
+
+
+def _ci_run_commands():
+    """Every shell command CI's `test` job runs, split on `&&` into atoms."""
+    ci = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text())
+    cmds = []
+    for step in ci["jobs"]["test"]["steps"]:
+        run = step.get("run")
+        if not run:
+            continue
+        for line in run.splitlines():
+            for atom in line.split("&&"):
+                atom = atom.strip()
+                if atom:
+                    cmds.append(atom)
+    return cmds
+
+
+def test_proto_md_exists_with_the_five_sections():
+    proto = _proto()
+    # what this is / layout / build-test / hard rules / do-don't
+    for heading in ("What this is", "Layout", "Build", "Hard rules", "Do / don't"):
+        assert heading.lower() in proto.lower(), heading
+
+
+def test_proto_md_build_commands_match_ci_exactly():
+    """Every command CI's test job runs must appear verbatim in PROTO.md, so the
+    grounding doc can never drift from the real gate."""
+    proto = _proto()
+    cmds = _ci_run_commands()
+    # the four gate commands are the point of the exercise — make sure they're here
+    for gate in ("ruff check .", "ruff format --check .", "pytest -q", "node --test tests/js/*.test.mjs"):
+        assert gate in cmds, f"{gate} missing from ci.yml test job"
+    for cmd in cmds:
+        assert cmd in proto, f"CI runs `{cmd}` but PROTO.md does not mention it verbatim"
+
+
+def test_proto_md_covers_every_hard_rule():
+    proto = _proto()
+    required = [
+        "test_packaging.py",  # version lockstep is enforced here
+        "protoagent.plugin.yaml",  # ...the file it must match
+        "pywinpty",  # Windows' only runtime dep; POSIX has none
+        "requires_pip",  # how the Windows dep is declared
+        "vendor/",  # vendored xterm.js
+        "CDN",  # ...never from a CDN
+        "first frame",  # WS ticket auth
+        "/api/plugins/terminal/ticket",  # where the ticket is minted
+        "fleet-proxied",  # no bearer down a fleet-proxied socket
+        "#14",  # the PR that established it
+        "public_paths",  # exempts only the static prefix
+        "/plugins/terminal/static/",  # ...that prefix
+        "scrubbed",  # env secret scrubbing
+        "agent_access",  # tool gating
+        "foreground",  # terminal_run never types into a foreground program
+    ]
+    for token in required:
+        assert token in proto, f"PROTO.md hard rules omit: {token}"
+
+
+def test_claude_and_agents_md_only_point_to_proto():
+    for name in ("CLAUDE.md", "AGENTS.md"):
+        text = (ROOT / name).read_text()
+        assert "PROTO.md" in text, f"{name} must point to PROTO.md"
+        # a pointer, not a second copy of the rules
+        assert len(text.splitlines()) <= 4, f"{name} should be a short pointer, not a doc"
