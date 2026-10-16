@@ -124,11 +124,7 @@ def test_make_dry_run_emits_the_ci_commands_in_order():
         check=True,
         env=env,
     ).stdout
-    emitted = [
-        ln.strip()
-        for ln in out.splitlines()
-        if ln.strip() and not re.match(r"^make(\[\d+\])?:", ln.strip())
-    ]
+    emitted = [ln.strip() for ln in out.splitlines() if ln.strip() and not re.match(r"^make(\[\d+\])?:", ln.strip())]
     assert emitted == CI_COMMANDS
 
 
