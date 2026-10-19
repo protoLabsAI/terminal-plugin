@@ -11,7 +11,22 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from terminal import api
+from terminal.pty_session import PtySession, WinPtySession
 from terminal.sessions import SessionManager
+
+
+@pytest.mark.parametrize("backend", [PtySession, WinPtySession])
+def test_host_secrets_are_scrubbed_from_child_environment(monkeypatch, backend):
+    monkeypatch.setenv("AGENT_NAME", "roxy")
+    secrets = ("ROXY_API_KEY", "A2A_AUTH_TOKEN", "WORKSTATION_API_KEY", "WORKSPACE_API_KEY", "WORKSTACEAN_API_KEY")
+    for key in secrets:
+        monkeypatch.setenv(key, "host-secret-must-not-leak")
+    monkeypatch.setenv("TERMINAL_KEEP_ME", "ordinary-value")
+
+    env = backend(scrub_env=api.scrub_keys())._build_env()
+
+    assert all(key not in env for key in secrets)
+    assert env["TERMINAL_KEEP_ME"] == "ordinary-value"
 
 
 class Guard:

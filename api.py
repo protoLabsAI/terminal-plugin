@@ -178,7 +178,7 @@ def authorized(hello: dict | None, ws: WebSocket | None = None) -> bool:
 def scrub_keys() -> list[str]:
     """Host secrets to strip from the child shell's env so they don't leak into it."""
     agent = os.environ.get("AGENT_NAME", "protoagent").upper()
-    return [f"{agent}_API_KEY", "A2A_AUTH_TOKEN", "WORKSTACEAN_API_KEY"]
+    return [f"{agent}_API_KEY", "A2A_AUTH_TOKEN", "WORKSTATION_API_KEY", "WORKSPACE_API_KEY", "WORKSTACEAN_API_KEY"]
 
 
 def _num(value, default, lo, hi):
