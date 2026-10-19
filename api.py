@@ -41,9 +41,10 @@ import logging
 import os
 import secrets
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
-from fastapi import WebSocket  # module-level so the websocket route's annotation resolves
+from fastapi import Request, WebSocket  # module-level so route annotations resolve
 
 from .procinfo import cwd_of
 from .pty_session import display_path, resolve_cwd
@@ -119,40 +120,57 @@ def verify_token(expected: str, provided: str) -> bool:
 # host's operator gate. In-process, short-lived, burned on first use — a ticket that
 # leaks anywhere is near-worthless. Never logged.
 TICKET_TTL = 30.0
-_tickets: dict[str, float] = {}
+
+
+@dataclass(frozen=True)
+class _Ticket:
+    expires: float
+    device_id: str | None
+
+
+_tickets: dict[str, _Ticket] = {}
 
 
 def _prune_tickets(now: float) -> None:
-    for k in [k for k, exp in _tickets.items() if exp <= now]:
+    for k in [k for k, record in _tickets.items() if record.expires <= now]:
         _tickets.pop(k, None)
 
 
-def mint_ticket() -> str:
+def mint_ticket(device_id: str | None = None) -> str:
     """Issue a random single-use ticket, good for ``TICKET_TTL`` seconds."""
     now = time.monotonic()
     _prune_tickets(now)
     t = secrets.token_urlsafe(32)
-    _tickets[t] = now + TICKET_TTL
+    _tickets[t] = _Ticket(now + TICKET_TTL, device_id)
     return t
+
+
+def _consume_ticket(ticket: str) -> _Ticket | None:
+    """Atomically burn a ticket and return its trusted identity only while valid."""
+    if not ticket or not isinstance(ticket, str):
+        return None
+    now = time.monotonic()
+    record = _tickets.pop(ticket, None)
+    _prune_tickets(now)
+    return record if record is not None and record.expires > now else None
 
 
 def consume_ticket(ticket: str) -> bool:
     """Validate + burn a ticket. False if missing, unknown, replayed or expired."""
-    if not ticket or not isinstance(ticket, str):
-        return False
-    now = time.monotonic()
-    exp = _tickets.pop(ticket, None)
-    _prune_tickets(now)
-    return exp is not None and exp > now
+    return _consume_ticket(ticket) is not None
 
 
-def authorized(hello: dict | None) -> bool:
-    """Does this auth frame admit the socket? A valid ticket always does; otherwise the
-    operator ``token`` path (which is open when the host has no bearer configured)."""
+def authorized(hello: dict | None, ws: WebSocket | None = None) -> bool:
+    """Consume a ticket and bind its minter, or use the existing operator fallback."""
     if hello is None:
         return False
     ticket = hello.get("ticket")
-    if ticket and consume_ticket(str(ticket)):
+    record = _consume_ticket(str(ticket)) if ticket else None
+    if record is not None:
+        if record.device_id and ws is not None:
+            from a2a_impl.socket_guard import bind_device
+
+            bind_device(ws, record.device_id)
         return True
     return verify_token(expected_token(), str(hello.get("token") or ""))
 
@@ -249,7 +267,7 @@ def build_router(cfg):
     async def _ws(ws: WebSocket):
         await ws.accept()
         hello = await _receive_auth(ws)
-        if not authorized(hello):
+        if not authorized(hello, ws):
             await _safe_send(ws, {"type": "error", "message": "unauthorized"})
             await _safe_close(ws, code=4001)  # bad/missing/replayed ticket or operator bearer
             return
@@ -275,8 +293,13 @@ def build_api_router():
     router = APIRouter()
 
     @router.post("/ticket")
-    async def _ticket():
-        return JSONResponse({"ticket": mint_ticket(), "ttl": TICKET_TTL}, headers={"Cache-Control": "no-store"})
+    async def _ticket(request: Request):
+        from a2a_impl.socket_guard import request_device_id
+
+        return JSONResponse(
+            {"ticket": mint_ticket(request_device_id(request)), "ttl": TICKET_TTL},
+            headers={"Cache-Control": "no-store"},
+        )
 
     @router.get("/sessions")
     async def _sessions():

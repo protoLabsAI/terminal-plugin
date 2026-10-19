@@ -52,3 +52,27 @@ class _Registry:
 @pytest.fixture
 def registry():
     return _Registry()
+
+
+@pytest.fixture(autouse=True)
+def socket_guard_host(monkeypatch):
+    """Host-free implementation of the core 0.210.0 ticket binding helpers."""
+    import types
+
+    host = types.ModuleType("a2a_impl")
+    guard = types.ModuleType("a2a_impl.socket_guard")
+
+    def request_device_id(request):
+        did = getattr(request.state, "device_id", None)
+        return did if isinstance(did, str) and did else None
+
+    def bind_device(conn, device_id):
+        if device_id:
+            conn.scope.setdefault("state", {}).setdefault("device_id", str(device_id))
+
+    guard.request_device_id = request_device_id
+    guard.bind_device = bind_device
+    host.socket_guard = guard
+    monkeypatch.setitem(sys.modules, "a2a_impl", host)
+    monkeypatch.setitem(sys.modules, "a2a_impl.socket_guard", guard)
+    return guard
