@@ -65,7 +65,9 @@ The agent can work **with** your terminal, in plain sight — four tools, gated 
 Guardrails: `terminal_run` never types into a tab where a program holds the foreground
 (vim, a build, a REPL) — it would feed keystrokes into that program. It only uses one of
 *your* tabs when you ask it to (`session="active"` or an id), and it never switches your
-console view. The agent already has a hidden shell; this is the visible one — what it
+console view. If a tab stops accepting input (a stuck program that isn't reading its
+keyboard), `terminal_run` gives up typing after 10 seconds and says so — terminal I/O
+never runs on the server's event loop, so a wedged tab can't freeze the agent. The agent already has a hidden shell; this is the visible one — what it
 runs, you can watch, scroll back through, and take over. Whatever it reads goes to your
 model gateway, like any other tool result.
 

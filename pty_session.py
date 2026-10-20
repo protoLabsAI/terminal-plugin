@@ -7,18 +7,31 @@ Two backends behind one interface (start / read / write / resize / poll / aclose
   the manifest); validated by the CI windows job (tests/test_winpty.py, a real cmd.exe).
 
 ``open_session(...)`` picks the right backend for the platform. The POSIX session owns
-a child shell behind a pseudo-terminal: read its output off the master fd (in a thread,
-so the loop never blocks), write keystrokes, resize (``TIOCSWINSZ``), reap the group.
+a child shell behind a pseudo-terminal: read its output off the master fd, write
+keystrokes, resize (``TIOCSWINSZ``), reap the group.
+
+**No PTY I/O ever runs on the event loop.** Reads AND writes each have their own
+per-session thread. A write to a PTY blocks whenever the child stops reading its input
+(a program in raw mode that never reads, a full input queue) — and, worse, the child can
+only consume input as fast as its echo/redraw OUTPUT is drained, which is the loop's own
+pump. A write on the loop therefore deadlocks the whole server: the loop waits on the
+child, the child waits on the loop (terminal-plugin#20 — a member frozen until restart).
 """
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import errno
+import logging
 import os
+import select
 import signal
 import struct
 import sys
+import threading
+from collections import deque
+from collections.abc import Callable
 
 # Unix PTY primitives — guarded so the module still imports on Windows (which uses the
 # pywinpty backend). The POSIX PtySession references these only at runtime, on POSIX.
@@ -124,8 +137,174 @@ def default_shell() -> str:
     return os.environ.get("SHELL") or "/bin/bash"
 
 
+log = logging.getLogger("protoagent.plugins.terminal")
+
+WRITE_CHUNK = 1024  # bytes per write syscall — small, so a stall is noticed between chunks
+MAX_PENDING_INPUT = 4 << 20  # queued-but-unwritten input per session before keystrokes drop
+_POLL = 0.2  # seconds the writer thread waits for the PTY to accept input before rechecking
+
+
 class PtyError(Exception):
-    """A PTY lifecycle failure (start / resize)."""
+    """A PTY lifecycle failure (start / resize / a closed session)."""
+
+
+class PtyWriteTimeout(PtyError):
+    """The PTY stopped accepting input: ``written`` of ``total`` bytes went in before the
+    deadline. The rest is abandoned — never typed later, except at most the one chunk
+    (``WRITE_CHUNK``) already handed to the kernel, which lands if the PTY drains."""
+
+    def __init__(self, written: int, total: int, timeout: float):
+        self.written, self.total, self.timeout = written, total, timeout
+        super().__init__(f"the terminal stopped accepting input — {written} of {total} bytes written in {timeout:g}s")
+
+
+class _Input:
+    __slots__ = ("data", "done", "written", "cancelled")
+
+    def __init__(self, data: bytes, done: concurrent.futures.Future | None):
+        self.data, self.done, self.written, self.cancelled = data, done, 0, False
+
+
+class InputWriter:
+    """Feeds input to a PTY from ONE dedicated thread, strictly in order, so the event
+    loop never makes a write syscall. ``write_chunk(bytes) -> int`` does the (possibly
+    blocking) write; ``ready(timeout) -> bool`` says whether the PTY can take input now
+    (POSIX: ``select``), so the thread notices a close/cancel between waits instead of
+    sitting in a blocked write.
+
+    ``submit`` never blocks. A submit carrying a Future resolves it when every byte is
+    in (or fails it); ``cancel`` abandons an item that has not finished."""
+
+    def __init__(self, write_chunk: Callable[[bytes], int], ready: Callable[[float], bool] | None = None, *, name=""):
+        self._write_chunk = write_chunk
+        self._ready = ready or (lambda _t: True)
+        self._name = name or "terminal-input"
+        self._cond = threading.Condition()
+        self._queue: deque[_Input] = deque()
+        self._pending = 0  # bytes queued but not yet written
+        self._closed = False
+        self._warned = False  # one warning per backlog-full episode, not one per keystroke
+        self._thread: threading.Thread | None = None
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def submit(self, data: bytes, done: concurrent.futures.Future | None = None) -> _Input | None:
+        """Queue ``data``. None (and ``done`` failed) when the writer is closed or the
+        backlog is full — keystrokes into a PTY that has stopped reading are dropped
+        rather than queued without bound."""
+        with self._cond:
+            if self._closed or self._pending + len(data) > MAX_PENDING_INPUT:
+                reason = "the terminal is closed" if self._closed else "the terminal's input backlog is full"
+                if done is not None and not done.done():
+                    done.set_exception(PtyError(reason))
+                elif not self._closed and not self._warned:
+                    self._warned = True
+                    log.warning("[terminal] input dropped: %s (the shell isn't reading)", reason)
+                return None
+            self._warned = False
+            item = _Input(data, done)
+            self._queue.append(item)
+            self._pending += len(data)
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name=self._name, daemon=True)
+                self._thread.start()
+            self._cond.notify()
+            return item
+
+    def cancel(self, item: _Input) -> None:
+        with self._cond:
+            item.cancelled = True
+
+    def close(self, join: float = 0.0) -> None:
+        """Stop: fail whatever is queued and let the thread exit. ``join`` waits that
+        long for it (so the caller can close the fd only once nothing can write to it)."""
+        with self._cond:
+            self._closed = True
+            pending = list(self._queue)
+            self._queue.clear()
+            self._pending = 0
+            self._cond.notify_all()
+        for item in pending:
+            _fail(item, PtyError("the terminal is closed"))
+        t = self._thread
+        if join and t is not None and t is not threading.current_thread():
+            t.join(join)
+
+    def _run(self) -> None:
+        while True:
+            with self._cond:
+                while not self._queue and not self._closed:
+                    self._cond.wait()
+                if self._closed:
+                    return
+                item = self._queue[0]
+            err = self._feed(item)
+            with self._cond:
+                if self._queue and self._queue[0] is item:
+                    self._queue.popleft()
+                    self._pending -= len(item.data)
+                if err is not None:  # the PTY is gone — nothing queued can be written
+                    self._closed = True
+                    rest = list(self._queue)
+                    self._queue.clear()
+                    self._pending = 0
+            if err is not None:
+                _fail(item, err)
+                for other in rest:
+                    _fail(other, err)
+                return
+            if item.cancelled:
+                _fail(item, PtyError("cancelled"))
+            elif item.done is not None and not item.done.done():
+                item.done.set_result(item.written)
+
+    def _feed(self, item: _Input) -> Exception | None:
+        """Write one item, chunk by chunk. None on success or cancel; the error when the
+        PTY is gone (EIO / EBADF / closed)."""
+        view = memoryview(item.data)
+        while item.written < len(view):
+            if self._closed:
+                return PtyError("the terminal is closed")
+            if item.cancelled:
+                return None
+            try:
+                if not self._ready(_POLL):
+                    continue  # still full — recheck closed/cancelled, then wait again
+                n = self._write_chunk(bytes(view[item.written : item.written + WRITE_CHUNK]))
+            except InterruptedError:
+                continue
+            except BlockingIOError:  # aclose() switched the fd to non-blocking to drain it
+                return PtyError("the terminal is closing")
+            except Exception as exc:  # noqa: BLE001 — EIO (child gone), EBADF, a backend error
+                return PtyError(f"the terminal stopped accepting input: {exc}")
+            item.written += max(0, int(n or 0))
+        return None
+
+
+def _fail(item: _Input, exc: Exception) -> None:
+    if item.done is not None and not item.done.done():
+        item.done.set_exception(exc)
+
+
+async def send_input(writer: InputWriter, data: bytes, timeout: float) -> int:
+    """Queue ``data`` on ``writer`` and wait (without blocking the loop) until it is all
+    written. Raises ``PtyWriteTimeout`` after ``timeout`` seconds — the unwritten rest is
+    abandoned so a half-typed command can't finish typing itself later — and
+    ``PtyError`` when the terminal is closed or gone."""
+    done: concurrent.futures.Future = concurrent.futures.Future()
+    item = writer.submit(data, done)
+    fut = asyncio.wrap_future(done)
+    # After a timeout nobody awaits it any more; consume its late outcome quietly.
+    fut.add_done_callback(lambda f: f.cancelled() or f.exception())
+    if item is None:
+        return await fut  # raises the submit failure
+    try:
+        return await asyncio.wait_for(asyncio.shield(fut), timeout)
+    except asyncio.TimeoutError:
+        writer.cancel(item)
+        raise PtyWriteTimeout(item.written, len(data), timeout) from None
 
 
 class PtySession:
@@ -153,6 +332,11 @@ class PtySession:
         self.pid: int | None = None
         self._fd: int | None = None
         self._exit_code: int | None = None
+        self._writer: InputWriter | None = None
+        # Reads get their OWN thread: a pump parks in os.read for the session's whole life,
+        # and on the loop's shared default executor every open tab would hold one of its
+        # few workers — enough tabs and the host's to_thread / DNS calls starve.
+        self._reads: concurrent.futures.ThreadPoolExecutor | None = None
 
     # ── env ─────────────────────────────────────────────────────────────────────
     def _build_env(self) -> dict[str, str]:
@@ -187,15 +371,20 @@ class PtySession:
                 os._exit(127)
         self.pid = pid
         self._fd = fd
+        self._writer = InputWriter(self._write_chunk, self._writable, name=f"terminal-input-{pid}")
+        self._reads = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix=f"terminal-read-{pid}")
         self.resize(self.cols, self.rows)
 
     async def read(self, n: int = 65536) -> bytes:
         """A chunk of shell output; ``b""`` on EOF (the child exited). The blocking
-        read runs in a thread so the event loop keeps serving other sessions."""
-        if self._fd is None:
+        read runs on the session's own thread so the event loop keeps serving."""
+        if self._fd is None or self._reads is None:
             return b""
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._blocking_read, n)
+        try:
+            return await loop.run_in_executor(self._reads, self._blocking_read, n)
+        except RuntimeError:  # the read executor was shut down by aclose()
+            return b""
 
     def _blocking_read(self, n: int) -> bytes:
         try:
@@ -208,15 +397,31 @@ class PtySession:
             raise
 
     def write(self, data: str | bytes) -> None:
-        """Send keystrokes/paste to the shell."""
-        if self._fd is None:
+        """Send keystrokes/paste to the shell. Never blocks: the bytes are queued for the
+        session's input thread (a shell that has stopped reading can't stall the loop)."""
+        if self._writer is None or self._fd is None:
             return
-        if isinstance(data, str):
-            data = data.encode("utf-8", "replace")
-        try:
-            os.write(self._fd, data)
-        except OSError:
-            pass  # the shell may have just exited; the read loop will see EOF
+        self._writer.submit(_as_bytes(data))
+
+    async def send(self, data: str | bytes, timeout: float = 10.0) -> int:
+        """Type ``data`` and wait until the PTY has taken all of it. Raises
+        ``PtyWriteTimeout`` when it stops accepting input for ``timeout`` seconds, and
+        ``PtyError`` when the session is closed."""
+        if self._writer is None or self._fd is None:
+            raise PtyError("the terminal is closed")
+        return await send_input(self._writer, _as_bytes(data), timeout)
+
+    def _writable(self, timeout: float) -> bool:
+        fd = self._fd
+        if fd is None:
+            raise PtyError("the terminal is closed")
+        return bool(select.select([], [fd], [], timeout)[1])
+
+    def _write_chunk(self, chunk: bytes) -> int:
+        fd = self._fd
+        if fd is None:
+            raise PtyError("the terminal is closed")
+        return os.write(fd, chunk)
 
     def resize(self, cols: int, rows: int) -> None:
         """Set the PTY window size (``TIOCSWINSZ``) so the shell + TUIs reflow."""
@@ -271,6 +476,12 @@ class PtySession:
             if not await self._wait_exit(1.0):
                 self._signal_group(signal.SIGKILL)
                 await self._wait_exit(2.0)
+        if self._writer is not None:
+            # The child is gone, so a write in flight fails (EIO) at once; wait briefly for
+            # the input thread to let go BEFORE the fd number can be closed and reused.
+            await asyncio.to_thread(self._writer.close, 1.0)
+        if self._reads is not None:
+            self._reads.shutdown(wait=False, cancel_futures=True)
         if self._fd is not None:
             try:
                 os.close(self._fd)
@@ -351,12 +562,23 @@ class WinPtySession:
         self.pid: int | None = None
         self._proc = None
         self._exit_code: int | None = None
+        self._writer: InputWriter | None = None
+        self._reads: concurrent.futures.ThreadPoolExecutor | None = None
 
     def _build_env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if k not in self._scrub_env}
         env.update(_TERM_ENV)
         env.update(self._env_overrides)
         return env
+
+    def _write_chunk(self, chunk: bytes) -> int:
+        proc = self._proc
+        if proc is None:
+            raise PtyError("the terminal is closed")
+        # Decode leniently per chunk: a UTF-8 sequence split at a chunk edge degrades to
+        # U+FFFD rather than failing; WRITE_CHUNK is far above a typed line.
+        proc.write(chunk.decode("utf-8", "replace"))
+        return len(chunk)
 
     def start(self) -> None:
         try:
@@ -367,13 +589,15 @@ class WinPtySession:
             self.shell, cwd=self.cwd, env=self._build_env(), dimensions=(self.rows, self.cols)
         )
         self.pid = getattr(self._proc, "pid", None)
+        self._writer = InputWriter(self._write_chunk, name=f"terminal-input-{self.pid}")
+        self._reads = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix=f"terminal-read-{self.pid}")
 
     async def read(self, n: int = 65536) -> bytes:
-        if self._proc is None:
+        if self._proc is None or self._reads is None:
             return b""
         loop = asyncio.get_running_loop()
         try:
-            data = await loop.run_in_executor(None, self._proc.read, n)
+            data = await loop.run_in_executor(self._reads, self._proc.read, n)
         except EOFError:
             return b""
         except Exception:  # noqa: BLE001 — treat any read failure as EOF
@@ -383,14 +607,14 @@ class WinPtySession:
         return data.encode("utf-8", "replace") if isinstance(data, str) else data
 
     def write(self, data: str | bytes) -> None:
-        if self._proc is None:
+        if self._proc is None or self._writer is None:
             return
-        if isinstance(data, bytes):
-            data = data.decode("utf-8", "replace")
-        try:
-            self._proc.write(data)
-        except Exception:  # noqa: BLE001
-            pass
+        self._writer.submit(_as_bytes(data))
+
+    async def send(self, data: str | bytes, timeout: float = 10.0) -> int:
+        if self._proc is None or self._writer is None:
+            raise PtyError("the terminal is closed")
+        return await send_input(self._writer, _as_bytes(data), timeout)
 
     def resize(self, cols: int, rows: int) -> None:
         self.cols, self.rows = max(1, int(cols)), max(1, int(rows))
@@ -418,8 +642,16 @@ class WinPtySession:
                 self._proc.terminate(force=True)
             except Exception:  # noqa: BLE001
                 pass
+            if self._writer is not None:
+                await asyncio.to_thread(self._writer.close, 1.0)
+            if self._reads is not None:
+                self._reads.shutdown(wait=False, cancel_futures=True)
             self._proc = None
         return self._exit_code
+
+
+def _as_bytes(data: str | bytes) -> bytes:
+    return data.encode("utf-8", "replace") if isinstance(data, str) else bytes(data)
 
 
 def open_session(**kw):

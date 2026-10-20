@@ -367,8 +367,12 @@ async def _bridge(ws, hello: dict, conf) -> None:
             return
 
     queue: asyncio.Queue = asyncio.Queue()
-    # Label the tab by the shell's LIVE cwd (it may have cd'd since it started).
-    here = await asyncio.to_thread(cwd_of, sess.pty.pid) if getattr(sess.pty, "pid", None) else ""
+    # Label a RESUMED tab by the shell's LIVE cwd (it may have cd'd since it started). A
+    # shell forked a moment ago may not have reached its chdir yet — the OS would still
+    # report the server's cwd — so a new tab is labelled by where it is starting.
+    here = ""
+    if resumed and getattr(sess.pty, "pid", None):
+        here = await asyncio.to_thread(cwd_of, sess.pty.pid)
     sess.attach(queue, resumed=resumed, label=display_path(here) if here else "")
     writer = asyncio.create_task(_write_out(ws, queue))
     killed = False
