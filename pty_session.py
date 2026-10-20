@@ -150,7 +150,8 @@ class PtyError(Exception):
 
 class PtyWriteTimeout(PtyError):
     """The PTY stopped accepting input: ``written`` of ``total`` bytes went in before the
-    deadline. The rest was abandoned, never typed later."""
+    deadline. The rest is abandoned — never typed later, except at most the one chunk
+    (``WRITE_CHUNK``) already handed to the kernel, which lands if the PTY drains."""
 
     def __init__(self, written: int, total: int, timeout: float):
         self.written, self.total, self.timeout = written, total, timeout
@@ -182,6 +183,7 @@ class InputWriter:
         self._queue: deque[_Input] = deque()
         self._pending = 0  # bytes queued but not yet written
         self._closed = False
+        self._warned = False  # one warning per backlog-full episode, not one per keystroke
         self._thread: threading.Thread | None = None
 
     @property
@@ -197,9 +199,11 @@ class InputWriter:
                 reason = "the terminal is closed" if self._closed else "the terminal's input backlog is full"
                 if done is not None and not done.done():
                     done.set_exception(PtyError(reason))
-                elif not self._closed:
-                    log.warning("[terminal] input dropped: %s", reason)
+                elif not self._closed and not self._warned:
+                    self._warned = True
+                    log.warning("[terminal] input dropped: %s (the shell isn't reading)", reason)
                 return None
+            self._warned = False
             item = _Input(data, done)
             self._queue.append(item)
             self._pending += len(data)
