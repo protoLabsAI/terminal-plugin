@@ -26,11 +26,13 @@ import shlex
 import time
 
 from .procinfo import command_name, cwd_of
+from .pty_session import PtyError, PtyWriteTimeout
 from .sessions import MANAGER, SessionLimitError
 from .textutil import clean, tail_lines
 
 MAX_OUTPUT_CHARS = 12_000  # what one tool result may carry back into the context
 AGENT_TAB = "Agent"
+TYPE_TIMEOUT = 10.0  # seconds the tab may take to accept the typed command line
 
 ACCESS_LEVELS = ("off", "read", "run")
 
@@ -202,7 +204,20 @@ def build_tools(registry, conf):
             )
         line = f"cd {shlex.quote(os.path.expanduser(cwd))} && {command}" if cwd else command
         start = sess.emitted
-        sess.write(line + "\r")
+        try:
+            # Off-loop and bounded: a tab that has stopped reading its input must fail the
+            # call, never stall it (or, before #20, the whole server's event loop).
+            await sess.send(line + "\r", TYPE_TIMEOUT)
+        except PtyWriteTimeout as exc:
+            return (
+                f"Terminal {sess.id} stopped accepting input — only {exc.written} of {exc.total} bytes of "
+                f"the command went in within {exc.timeout:g}s, so the rest was dropped and nothing ran "
+                "cleanly. Something in that tab isn't reading its keyboard (a stuck program or a full input "
+                "buffer). Check it with terminal_read, or use session='new'. Keep very long scripts in a file "
+                "and run the file instead of typing them."
+            )
+        except PtyError as exc:
+            return f"Couldn't type into terminal {sess.id}: {exc}. terminal_list shows what's open."
         finished = await _wait_for_prompt(sess, max(0.0, min(float(wait_seconds), 300.0)))
         raw, complete = sess.text_since(start)
         out = clean(raw)

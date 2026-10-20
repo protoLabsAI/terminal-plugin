@@ -208,7 +208,13 @@ class Session:
 
     # ── input ────────────────────────────────────────────────────────────────────
     def write(self, data) -> None:
+        """Keystrokes from a viewer — queued, never blocks the loop."""
         self.pty.write(data)
+
+    async def send(self, data, timeout: float = 10.0) -> int:
+        """Type ``data`` and wait until the shell has taken all of it; raises
+        ``PtyWriteTimeout`` when it stops accepting input (see pty_session)."""
+        return await self.pty.send(data, timeout)
 
     def resize(self, cols: int, rows: int) -> None:
         if self._redraw_pending and rows > 1:

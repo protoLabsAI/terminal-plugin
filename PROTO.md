@@ -99,6 +99,14 @@ Dev dependencies are in `requirements-dev.txt` plus `ruff`
   - Operator/agent **secrets are scrubbed** from the child shell's environment
     (`<AGENT>_API_KEY`, `A2A_AUTH_TOKEN`, …).
 
+- **No PTY I/O on the event loop** (#20, v0.9.4). Reads and writes each run on the
+  session's own thread (`InputWriter` in `pty_session.py`); a write to a PTY blocks
+  whenever the child stops reading, and since the child's echo is drained by the loop's
+  own pump, a write on the loop deadlocks the whole server. Viewer keystrokes are
+  queued (`write`, never blocks); `terminal_run` types with the bounded `send()` and
+  fails the call on `PtyWriteTimeout`. Tests for this use real processes
+  (`tests/test_input_backpressure.py`), never a mocked write.
+
 - **Agent tools are gated by `agent_access`** (`off | read | run`), and
   **`terminal_run` must never type into a tab where a program holds the foreground**
   (vim, a build, a REPL) — it would feed keystrokes into that program.
