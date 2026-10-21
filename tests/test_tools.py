@@ -4,6 +4,7 @@ way they run on the server's loop in production."""
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import os
 import threading
 import time
@@ -131,6 +132,46 @@ async def test_run_does_not_hang_the_loop_when_the_foreground_probe_blocks(t, mg
         beat.cancel()
         release.set()
         await mgr.close_all()
+
+
+async def test_busy_probe_does_not_consume_the_shared_default_executor(mgr, monkeypatch):
+    """terminal-plugin#21 — a foreground probe wedged in tcgetpgrp must strand only its
+    OWN session's worker, never a worker on the loop's shared default executor (which
+    asyncio.to_thread / the host's DNS use). _wait_for_prompt fires a probe ~every 0.6s
+    for up to 300s, so a probe on the default pool would leak a worker each time until the
+    pool is exhausted and every other tab's probe and the host's own to_thread calls
+    starve. Here a one-worker default pool stays free for other work the whole time a
+    probe is wedged."""
+    loop = asyncio.get_running_loop()
+    tiny = concurrent.futures.ThreadPoolExecutor(1)  # a default pool with a single worker
+    loop.set_default_executor(tiny)
+    sess = mgr.create(shell="/bin/sh", origin="agent")
+    await asyncio.sleep(0.3)
+    release = threading.Event()
+
+    def blocking_fg():
+        release.wait(30)  # the probe parks here, holding one thread, until teardown
+        return sess.pty.pid
+
+    monkeypatch.setattr(sess.pty, "foreground_pgid", blocking_fg)
+    probe = asyncio.create_task(sess.busy_probe(5.0))
+    try:
+        await asyncio.sleep(0.2)  # let the probe thread park in blocking_fg
+        # The single shared-default worker must still be free: asyncio.to_thread runs
+        # promptly even while the probe is wedged. On the old to_thread probe this would
+        # queue behind the wedged thread and time out.
+        started = time.monotonic()
+        got = await asyncio.wait_for(asyncio.to_thread(lambda: "free"), 2.0)
+        assert got == "free"
+        assert time.monotonic() - started < 2.0
+        # And the probe really was wedged, not finished (so the "free" result above
+        # genuinely came from a worker the probe didn't hold).
+        assert not probe.done()
+    finally:
+        probe.cancel()
+        release.set()
+        await mgr.close_all()
+        tiny.shutdown(wait=False)
 
 
 async def test_run_refuses_to_type_when_the_tabs_state_cannot_be_read(t, mgr, monkeypatch):

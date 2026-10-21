@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import concurrent.futures
 import logging
 import secrets
 import time
@@ -75,6 +76,14 @@ class Session:
         self._viewer: asyncio.Queue | None = None
         self._pump: asyncio.Task | None = None
         self._redraw_pending = False
+        # busy_probe() runs foreground_pgid() (tcgetpgrp) here, NOT on the loop's shared
+        # default executor. tcgetpgrp can block when the line discipline is held; on a
+        # dedicated single-worker pool a wedged probe strands only THIS session's one
+        # thread, where asyncio.to_thread would leak a shared-pool worker on every ~0.6s
+        # probe until the pool is exhausted and other tabs' probes — plus the host's own
+        # to_thread/DNS — starve (same reasoning as PtySession._reads). Lazy; closed in
+        # aclose().
+        self._probes: concurrent.futures.ThreadPoolExecutor | None = None
 
     @property
     def shell(self) -> str:
@@ -161,18 +170,31 @@ class Session:
         """Like ``busy()``, but OFF the event loop and bounded. ``foreground_pgid`` reads
         the PTY line discipline (``tcgetpgrp``), which can block when the discipline is
         held — on the loop that would stall every coroutine, so ``terminal_run``'s wait
-        could never reach its deadline (terminal-plugin#21). Probe on a worker thread with
-        a hard ``timeout`` instead.
+        could never reach its deadline (terminal-plugin#21). Probe on this session's OWN
+        worker thread with a hard ``timeout`` instead.
 
         Returns ``(fg_pgid, known)``: ``(pgid, True)`` a program other than the shell holds
         the terminal; ``(None, True)`` the shell is at its prompt; ``(None, False)`` the
         state couldn't be read in time — callers treat an unknown state as busy and never
-        type blind into the tab."""
+        type blind into the tab.
+
+        The probe runs on a dedicated single-worker executor, NOT ``asyncio.to_thread``
+        (the loop's shared default pool). A ``tcgetpgrp`` that never returns then strands
+        only this session's one probe thread: ``_wait_for_prompt`` starts a fresh probe
+        roughly every 0.6s for up to 300s, so on ``to_thread`` a wedged tab would leak a
+        shared-pool worker each time until the pool is exhausted and every other tab's
+        probe — plus the host's own ``to_thread`` / DNS calls — starves (the same reasoning
+        as ``PtySession._reads``). A later probe fired while that one thread is still wedged
+        just queues and times out as ``unknown`` here, which is exactly right: a tab whose
+        state we can't read is treated as busy."""
         probe = getattr(self.pty, "foreground_pgid", None)
         if probe is None:  # Windows / no job control — the shell always holds the terminal
             return None, True
+        if self._probes is None:
+            self._probes = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix=f"terminal-probe-{self.id}")
+        loop = asyncio.get_running_loop()
         try:
-            fg = await asyncio.wait_for(asyncio.to_thread(probe), timeout)
+            fg = await asyncio.wait_for(loop.run_in_executor(self._probes, probe), timeout)
         except Exception:  # noqa: BLE001 — a timeout or a tcgetpgrp error: state unknown
             return None, False
         busy = fg if fg and self.pty.pid and fg != self.pty.pid else None
@@ -256,6 +278,11 @@ class Session:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         await self.pty.aclose()
+        if self._probes is not None:
+            # The master fd is closed now, so a probe wedged in tcgetpgrp unblocks (EBADF);
+            # drop the pool without waiting so teardown never blocks on a probe thread.
+            self._probes.shutdown(wait=False, cancel_futures=True)
+            self._probes = None
 
 
 class SessionManager:
