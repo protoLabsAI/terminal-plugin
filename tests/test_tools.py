@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
+import time
 
 import pytest
 
@@ -72,6 +74,85 @@ async def test_run_returns_early_for_a_long_running_command(t, mgr):
         busy = await t["terminal_run"].ainvoke({"command": "echo nope", "wait_seconds": 2})
         assert "busy running" in busy and "sleep" in busy
     finally:
+        await mgr.close_all()
+
+
+async def test_run_returns_at_the_deadline_for_a_command_that_never_prompts(t, mgr):
+    """terminal-plugin#21 — a tab kept busy (and noisy) for the whole wait returns
+    'still running after Ns' AT the deadline, not after the command eventually ends."""
+    try:
+        started = time.monotonic()
+        out = await t["terminal_run"].ainvoke(
+            {"command": "while true; do echo tick; sleep 0.1; done", "wait_seconds": 3}
+        )
+        elapsed = time.monotonic() - started
+        assert "still running after 3s" in out
+        assert elapsed < 5, f"took {elapsed:.1f}s — the wait overran its deadline"
+    finally:
+        await mgr.close_all()
+
+
+async def test_run_does_not_hang_the_loop_when_the_foreground_probe_blocks(t, mgr, monkeypatch):
+    """terminal-plugin#21 — if foreground_pgid blocks far past the wait, terminal_run
+    still returns within wait + 2s (the probe runs off-loop, bounded) and the event loop
+    keeps serving other coroutines throughout."""
+    sess = mgr.create(shell="/bin/sh", origin="agent")
+    await asyncio.sleep(0.4)  # let the first prompt settle before we swap the probe
+    release = threading.Event()
+    calls = {"n": 0}
+    shell_pid = sess.pty.pid
+
+    def blocking_fg():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return shell_pid  # the pre-typing probe sees the shell at its prompt — safe to type
+        release.wait(30)  # every wait-loop probe wedges here until teardown
+        return shell_pid
+
+    monkeypatch.setattr(sess.pty, "foreground_pgid", blocking_fg)
+
+    ticks = 0
+
+    async def ticker():
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0.05)
+
+    beat = asyncio.create_task(ticker())
+    try:
+        started = time.monotonic()
+        out = await t["terminal_run"].ainvoke({"command": "echo marker; sleep 30", "wait_seconds": 3})
+        elapsed = time.monotonic() - started
+        assert elapsed < 5, f"took {elapsed:.1f}s — a blocking probe stalled the wait"
+        assert "still running after 3s" in out
+        assert ticks > 15, f"only {ticks} ticks — the event loop was blocked during the wait"
+    finally:
+        beat.cancel()
+        release.set()
+        await mgr.close_all()
+
+
+async def test_run_refuses_to_type_when_the_tabs_state_cannot_be_read(t, mgr, monkeypatch):
+    """terminal-plugin#21 — when the pre-typing probe can't read the tab's state in time,
+    terminal_run refuses and types nothing (never feed keystrokes into a wedged tab)."""
+    sess = mgr.create(shell="/bin/sh", origin="agent")
+    await asyncio.sleep(0.4)
+    marker = sess.emitted
+    release = threading.Event()
+
+    def blocking_fg():
+        release.wait(30)  # the pre-typing probe can never read the state in time
+        return sess.pty.pid
+
+    monkeypatch.setattr(sess.pty, "foreground_pgid", blocking_fg)
+    try:
+        out = await t["terminal_run"].ainvoke({"command": "echo should_not_run", "wait_seconds": 3})
+        assert "couldn't be read" in out and "state" in out.lower()
+        raw, _ = sess.text_since(marker)
+        assert "should_not_run" not in raw  # nothing was typed into the tab
+    finally:
+        release.set()
         await mgr.close_all()
 
 

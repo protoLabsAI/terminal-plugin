@@ -157,6 +157,27 @@ class Session:
         fg = self.pty.foreground_pgid() if hasattr(self.pty, "foreground_pgid") else None
         return fg if fg and self.pty.pid and fg != self.pty.pid else None
 
+    async def busy_probe(self, timeout: float = 0.5) -> tuple[int | None, bool]:
+        """Like ``busy()``, but OFF the event loop and bounded. ``foreground_pgid`` reads
+        the PTY line discipline (``tcgetpgrp``), which can block when the discipline is
+        held — on the loop that would stall every coroutine, so ``terminal_run``'s wait
+        could never reach its deadline (terminal-plugin#21). Probe on a worker thread with
+        a hard ``timeout`` instead.
+
+        Returns ``(fg_pgid, known)``: ``(pgid, True)`` a program other than the shell holds
+        the terminal; ``(None, True)`` the shell is at its prompt; ``(None, False)`` the
+        state couldn't be read in time — callers treat an unknown state as busy and never
+        type blind into the tab."""
+        probe = getattr(self.pty, "foreground_pgid", None)
+        if probe is None:  # Windows / no job control — the shell always holds the terminal
+            return None, True
+        try:
+            fg = await asyncio.wait_for(asyncio.to_thread(probe), timeout)
+        except Exception:  # noqa: BLE001 — a timeout or a tcgetpgrp error: state unknown
+            return None, False
+        busy = fg if fg and self.pty.pid and fg != self.pty.pid else None
+        return busy, True
+
     def _send(self, msg: dict) -> None:
         if self._viewer is not None:
             self._viewer.put_nowait(msg)
