@@ -33,6 +33,8 @@ from .textutil import clean, tail_lines
 MAX_OUTPUT_CHARS = 12_000  # what one tool result may carry back into the context
 AGENT_TAB = "Agent"
 TYPE_TIMEOUT = 10.0  # seconds the tab may take to accept the typed command line
+BUSY_PROBE_TIMEOUT = 0.5  # hard bound on one off-loop foreground-state probe; over it = unknown
+WAIT_MARGIN = 1.5  # terminal_run's wait can never overrun wait_seconds by more than this
 
 ACCESS_LEVELS = ("off", "read", "run")
 
@@ -61,7 +63,7 @@ def _resolve(target: str):
 
 
 async def _describe(sess) -> dict:
-    fg = sess.busy()
+    fg, _known = await sess.busy_probe(BUSY_PROBE_TIMEOUT)
     shell_pid = sess.pty.pid
     running, cwd = await asyncio.gather(
         asyncio.to_thread(command_name, fg) if fg else asyncio.sleep(0, ""),
@@ -195,7 +197,15 @@ def build_tools(registry, conf):
             return f"Couldn't start a shell: {exc}"
 
         await _settle(sess)
-        fg = sess.busy()
+        # Read the tab's foreground state OFF the loop with a hard bound: a probe that
+        # can't be read in time must refuse, never type blind into a possibly-wedged tab.
+        fg, known = await sess.busy_probe(BUSY_PROBE_TIMEOUT)
+        if not known:
+            return (
+                f"Terminal {sess.id}'s state couldn't be read in time, so nothing was typed — "
+                "something in that tab may be wedged (a program not reading its input). Check it "
+                "with terminal_read, or use session='new'."
+            )
         if fg:
             name = await asyncio.to_thread(command_name, fg)
             return (
@@ -218,7 +228,14 @@ def build_tools(registry, conf):
             )
         except PtyError as exc:
             return f"Couldn't type into terminal {sess.id}: {exc}. terminal_list shows what's open."
-        finished = await _wait_for_prompt(sess, max(0.0, min(float(wait_seconds), 300.0)))
+        wait = max(0.0, min(float(wait_seconds), 300.0))
+        try:
+            # A hard ceiling over the WHOLE wait: no inner probe or settle check can push
+            # the return past wait + WAIT_MARGIN, even if a foreground probe wedges. The
+            # command keeps running in the tab either way.
+            finished = await asyncio.wait_for(_wait_for_prompt(sess, wait), wait + WAIT_MARGIN)
+        except asyncio.TimeoutError:
+            finished = False
         raw, complete = sess.text_since(start)
         out = clean(raw)
         # Drop the echoed command line itself (the first line of the output).
@@ -271,7 +288,11 @@ async def _settle(sess, quiet: float = 0.4, limit: float = 3.0) -> None:
 
 async def _wait_for_prompt(sess, timeout: float) -> bool:
     """Wait until the command has finished: the shell holds the foreground again and the
-    output has been quiet briefly. True when it finished within ``timeout``."""
+    output has been quiet briefly. True when it finished within ``timeout``.
+
+    Every foreground probe runs OFF the loop with a hard per-call bound, and a probe that
+    times out counts as "still busy" — a tab whose state can't be read is never reported
+    done, and no inner call can keep the loop from reaching ``deadline``."""
     start = time.monotonic()
     deadline = start + timeout
     saw_busy = False
@@ -279,10 +300,15 @@ async def _wait_for_prompt(sess, timeout: float) -> bool:
     while True:
         if sess.exited:
             return True
-        now = time.monotonic()
+        if time.monotonic() >= deadline:
+            return False
         if sess.emitted != last:
+            last, still = sess.emitted, time.monotonic()
+        fg, known = await sess.busy_probe(BUSY_PROBE_TIMEOUT)
+        now = time.monotonic()
+        if sess.emitted != last:  # output arrived while we were probing
             last, still = sess.emitted, now
-        busy = sess.busy() is not None
+        busy = (fg is not None) or (not known)
         saw_busy = saw_busy or busy
         # Builtins (cd, echo) never leave the shell's group — for those, settle on quiet.
         if not busy and (saw_busy or now - start >= 1.0) and now - still >= 0.3:
