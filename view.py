@@ -101,6 +101,20 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   #find button:hover{color:var(--pl-color-fg,#ededed);background:var(--pl-color-bg-hover,#24242a)}
   #find button.on{color:var(--pl-color-accent-fg,var(--pl-color-fg,#ededed));background:var(--pl-color-accent,#9b87f2)}
   #findn{min-width:5ch;text-align:right;color:var(--pl-color-fg-muted,#9a9aa5);font-size:11px;font-variant-numeric:tabular-nums}
+  /* The scrollbar IS xterm's native .xterm-viewport bar (vendor overflow-y:scroll). At rest
+     macOS WebKit (desktop app) & overlay-scrollbar browsers paint nothing to grab, so style
+     it into a classic, always-visible, draggable thumb coloured from --pl-* tokens. The
+     width is a FIXED 10px (never per-content): the viewport already reserves the gutter, so
+     FitAddon's measured scrollBarWidth stays constant and there's no refit loop/flicker.
+     Also override vendor's opaque #000 track to the pane bg (no black strip). */
+  .xterm .xterm-viewport{background-color:var(--pl-color-bg,#0a0a0c);
+    scrollbar-width:thin;scrollbar-color:var(--pl-color-border-strong,rgba(255,255,255,.18)) transparent}
+  .xterm .xterm-viewport::-webkit-scrollbar{width:10px}
+  .xterm .xterm-viewport::-webkit-scrollbar-track{background:transparent}
+  .xterm .xterm-viewport::-webkit-scrollbar-thumb{background:var(--pl-color-border-strong,rgba(255,255,255,.18));
+    border-radius:5px;border:2px solid transparent;background-clip:padding-box}
+  .xterm .xterm-viewport::-webkit-scrollbar-thumb:hover,
+  .xterm .xterm-viewport::-webkit-scrollbar-thumb:active{background:var(--pl-color-fg-subtle,#71717a)}
 </style>
 </head><body><div class="wrap">
   <div class="bar">

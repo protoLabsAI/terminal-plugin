@@ -122,6 +122,24 @@ def test_renaming_a_tab_cannot_change_the_layout():
     assert "#terms{position:relative;flex:1 1 auto;min-height:0;overflow:hidden}" in PAGE
 
 
+def test_viewport_has_a_visible_draggable_scrollbar():
+    """The operator-reported fix: xterm's .xterm-viewport bar is an invisible overlay at
+    rest in the desktop app's WebKit, so the PAGE styles it into a classic, always-visible,
+    draggable thumb coloured from --pl-* tokens, with the track matching the pane bg."""
+    from terminal.view import PAGE
+
+    # WebKit (desktop app): a styled scrollbar forces a classic, grabbable bar — fixed width
+    assert ".xterm .xterm-viewport::-webkit-scrollbar{width:10px}" in PAGE
+    assert ".xterm .xterm-viewport::-webkit-scrollbar-track{background:transparent}" in PAGE
+    # the thumb is drawn from a --pl-* token (resting) and brightens on hover/active
+    assert ".xterm .xterm-viewport::-webkit-scrollbar-thumb{background:var(--pl-color-border-strong," in PAGE
+    assert "::-webkit-scrollbar-thumb:active{background:var(--pl-color-fg-subtle," in PAGE
+    # Firefox: the thin, token-coloured bar
+    assert "scrollbar-width:thin;scrollbar-color:var(--pl-color-border-strong," in PAGE
+    # the track matches the pane (override vendor's opaque #000 → no black strip)
+    assert ".xterm .xterm-viewport{background-color:var(--pl-color-bg," in PAGE
+
+
 def test_new_tabs_never_flash_a_placeholder_name():
     app = _app_js()
     assert 'name || CFG.startDir || "Terminal "' in app  # named by the start dir from frame one
