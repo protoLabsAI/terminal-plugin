@@ -98,8 +98,11 @@ def test_view_page_persists_sessions():
     # config comes from the server, not hardcoded — including the scroll-speed knobs, which
     # are dead unless terminal.js actually hands them to the Terminal constructor
     assert "__TERMINAL_CONFIG__" in PAGE and "scrollback: CFG.scrollback" in app and "CFG.fontSize" in app
+    # ...with xterm's sluggish defaults (1/5) overridden, falling back to 2/5 for a
+    # standalone/older config that doesn't ship the keys
     assert (
-        "scrollSensitivity: CFG.scrollSensitivity" in app and "fastScrollSensitivity: CFG.fastScrollSensitivity" in app
+        "scrollSensitivity: CFG.scrollSensitivity || 2" in app
+        and "fastScrollSensitivity: CFG.fastScrollSensitivity || 5" in app
     )
     assert "prompt(" not in app  # inline rename — a sandboxed iframe can't rely on prompt()
     # a hidden pane is never fitted (it would shrink the shell to one row)
