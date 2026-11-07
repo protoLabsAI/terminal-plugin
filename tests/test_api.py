@@ -338,7 +338,10 @@ def test_a_split_starts_in_the_source_panes_cwd(client, tmp_path):
     c = client({"shell": "/bin/sh", "login_shell": False})
     with c.websocket_connect("/plugins/terminal/ws") as a:
         src = _auth(a)["session"]
-        a.send_json({"type": "input", "data": f"cd {tmp_path} && echo moved_ok\n"})
+        # The marker is split by '' so it survives the shell but is absent from the pty's
+        # echo of the typed line — otherwise _read_until matches the echo and races the cd,
+        # letting the split's cwd probe read home before the chdir lands (flaky).
+        a.send_json({"type": "input", "data": f"cd {tmp_path} && echo moved''_ok\n"})
         _read_until(a, "moved_ok\r")
         with c.websocket_connect("/plugins/terminal/ws") as b:
             b.send_json({"type": "auth", "token": "", "cwd_from": src})
@@ -669,7 +672,9 @@ def test_connected_labels_the_tab_with_the_live_cwd(client, tmp_path):
         m = _auth(ws)
         assert m["label"] == "~"  # a new shell starts at home
         sid = m["session"]
-        ws.send_json({"type": "input", "data": f"cd {tmp_path} && echo moved_ok\n"})
+        # '' keeps the marker out of the pty's echo of the typed line, so _read_until
+        # waits for the command's real output (the chdir has landed) and not the echo.
+        ws.send_json({"type": "input", "data": f"cd {tmp_path} && echo moved''_ok\n"})
         _read_until(ws, "moved_ok\r")
     with c.websocket_connect("/plugins/terminal/ws") as ws:
         m = _auth(ws, session=sid)

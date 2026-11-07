@@ -383,6 +383,7 @@ export function boot({ kit, BASE, CFG, xt }) {
     const host = document.createElement("div"); host.className = "xhost"; el.appendChild(host);
     const term = new Terminal({
       cursorBlink: true, cursorStyle: CFG.cursorStyle, fontSize, scrollback: CFG.scrollback,
+      scrollSensitivity: CFG.scrollSensitivity, fastScrollSensitivity: CFG.fastScrollSensitivity,
       fontFamily: MONO, lineHeight: 1.0, customGlyphs: true, allowProposedApi: true,
       macOptionIsMeta: CFG.optionAsMeta, macOptionClickForcesSelection: true,
       rightClickSelectsWord: false, theme,
