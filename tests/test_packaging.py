@@ -95,8 +95,12 @@ def test_view_page_persists_sessions():
     assert "localStorage" in app and "session: p.sessionId" in app
     # the tab's × ends the shell explicitly (a bare disconnect only detaches)
     assert 'type: "close"' in app
-    # config comes from the server, not hardcoded
+    # config comes from the server, not hardcoded — including the scroll-speed knobs, which
+    # are dead unless terminal.js actually hands them to the Terminal constructor
     assert "__TERMINAL_CONFIG__" in PAGE and "scrollback: CFG.scrollback" in app and "CFG.fontSize" in app
+    assert (
+        "scrollSensitivity: CFG.scrollSensitivity" in app and "fastScrollSensitivity: CFG.fastScrollSensitivity" in app
+    )
     assert "prompt(" not in app  # inline rename — a sandboxed iframe can't rely on prompt()
     # a hidden pane is never fitted (it would shrink the shell to one row)
     assert "if (!p.el.offsetWidth || !p.el.offsetHeight) return;" in app
