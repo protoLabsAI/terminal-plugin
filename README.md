@@ -23,8 +23,9 @@ Install into any protoAgent agent from this git URL — it's not tied to one age
   `keep_alive_minutes` (default 30), then is ended. Opening the same terminal in a
   second window takes it over (press any key in the first to take it back). When a
   shell exits, press any key for a new one.
-- **Settings** — shell, starting directory, font size, scrollback, keep-alive and the
-  shell limit are editable in **Settings ▸ Plugins ▸ Terminal**, and apply without a
+- **Settings** — shell, starting directory, font size, scrollback, scroll speed
+  (`scroll_sensitivity`), fast scroll speed (`fast_scroll_sensitivity`, Alt+wheel),
+  keep-alive and the shell limit are editable in **Settings ▸ Plugins ▸ Terminal**, and apply without a
   restart (font/scrollback on the next view load, shell/cwd to the next new shell).
   A new shell starts in your **home folder** unless you set a starting directory
   (`~/code` and `$VARS` expand; a folder that does not exist falls back to home, with
@@ -159,6 +160,8 @@ terminal:
   shell: ""                 # blank → $SHELL, then /bin/bash
   cwd: ""                   # blank → your home folder; ~ and $VARS expand
   scrollback: 5000
+  scroll_sensitivity: 2     # wheel notch multiplier, 0.25–10
+  fast_scroll_sensitivity: 5 # Alt+wheel multiplier, 1–20
   font_size: 13
   keep_alive_minutes: 30    # detached shells live this long; 0 = end on disconnect
   max_sessions: 12

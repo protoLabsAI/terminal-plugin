@@ -1,6 +1,6 @@
 id: terminal
 name: Terminal
-version: 0.9.5
+version: 0.9.6
 description: >-
   A full terminal in the protoAgent console — an xterm.js view wired to a real PTY
   shell over a WebSocket. The terminal is themed from the protoAgent design system
@@ -23,6 +23,8 @@ config:
   shell: ""                 # the shell to spawn; blank → $SHELL, then /bin/bash
   cwd: ""                   # working dir the shell starts in; blank → your home folder (~ and $VARS expand)
   scrollback: 5000          # xterm scrollback lines
+  scroll_sensitivity: 2     # wheel notch multiplier, 0.25–10
+  fast_scroll_sensitivity: 5 # Alt+wheel multiplier, 1–20
   font_size: 13             # xterm font size (px)
   keep_alive_minutes: 30    # a shell with no attached view survives this long (0 = end it on disconnect)
   max_sessions: 12          # live shells allowed at once (across every open console)
@@ -44,6 +46,8 @@ settings:
   - { key: cwd, label: "Starting directory", type: string, description: "Where a new shell starts. Blank starts in your home folder. ~ and $VARS expand; a missing folder falls back to home." }
   - { key: font_size, label: "Font size (px)", type: number, description: "Terminal font size, 8-32. Applies when the view next loads." }
   - { key: scrollback, label: "Scrollback (lines)", type: number, description: "Lines of history each terminal keeps. Applies when the view next loads." }
+  - { key: scroll_sensitivity, label: "Scroll speed", type: number, description: "Lines per wheel notch multiplier. Applies when the view next loads." }
+  - { key: fast_scroll_sensitivity, label: "Fast scroll speed (Alt+wheel)", type: number, description: "Lines per wheel notch multiplier. Applies when the view next loads." }
   - { key: keep_alive_minutes, label: "Keep detached shells (minutes)", type: number, description: "How long a shell keeps running with no terminal attached (view closed, reload, network drop) before it is ended. 0 ends it on disconnect." }
   - { key: max_sessions, label: "Max open shells", type: number, description: "Live shells allowed at once, across every open console." }
   - { key: login_shell, label: "Login shell", type: bool, description: "Start shells as login shells, so ~/.zprofile / ~/.bash_profile run and PATH matches your usual terminal. Applies to new shells." }

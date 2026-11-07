@@ -38,6 +38,7 @@ import asyncio
 import hmac
 import json
 import logging
+import math
 import os
 import secrets
 import time
@@ -60,6 +61,8 @@ DEFAULTS = {
     "shell": "",
     "cwd": "",
     "scrollback": 5000,
+    "scroll_sensitivity": 2,
+    "fast_scroll_sensitivity": 5,
     "font_size": 13,
     "keep_alive_minutes": 30,
     "max_sessions": 12,
@@ -181,9 +184,11 @@ def scrub_keys() -> list[str]:
     return [f"{agent}_API_KEY", "A2A_AUTH_TOKEN", "WORKSTATION_API_KEY", "WORKSPACE_API_KEY", "WORKSTACEAN_API_KEY"]
 
 
-def _num(value, default, lo, hi):
+def _num(value, default, lo, hi, *, allow_float=False):
     try:
-        n = int(value)
+        n = float(value) if allow_float else int(value)
+        if allow_float and not math.isfinite(n):
+            return default
     except (TypeError, ValueError):
         return default
     return max(lo, min(hi, n))
@@ -197,6 +202,12 @@ def resolve(cfg: dict | None) -> dict:
         "shell": str(raw["shell"] or ""),
         "cwd": str(raw["cwd"] or ""),
         "scrollback": _num(raw["scrollback"], DEFAULTS["scrollback"], 100, 200_000),
+        "scroll_sensitivity": _num(
+            raw["scroll_sensitivity"], DEFAULTS["scroll_sensitivity"], 0.25, 10, allow_float=True
+        ),
+        "fast_scroll_sensitivity": _num(
+            raw["fast_scroll_sensitivity"], DEFAULTS["fast_scroll_sensitivity"], 1, 20, allow_float=True
+        ),
         "font_size": _num(raw["font_size"], DEFAULTS["font_size"], 8, 32),
         "keep_alive_minutes": _num(raw["keep_alive_minutes"], DEFAULTS["keep_alive_minutes"], 0, 7 * 24 * 60),
         "max_sessions": _num(raw["max_sessions"], DEFAULTS["max_sessions"], 1, 64),
@@ -221,6 +232,8 @@ def render_page(cfg: dict) -> str:
     client = {
         "fontSize": cfg["font_size"],
         "scrollback": cfg["scrollback"],
+        "scrollSensitivity": cfg["scroll_sensitivity"],
+        "fastScrollSensitivity": cfg["fast_scroll_sensitivity"],
         "fontFamily": cfg["font_family"],
         "cursorStyle": cfg["cursor_style"],
         "optionAsMeta": cfg["option_as_meta"],

@@ -3,6 +3,8 @@ through FastAPI's TestClient (it spawns an actual /bin/sh and echoes through it)
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import FastAPI, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -111,6 +113,56 @@ def test_view_served_on_the_public_path():
 def test_view_bakes_in_the_configured_font_and_scrollback():
     r = TestClient(_app({"font_size": 17, "scrollback": 12345})).get("/plugins/terminal/view")
     assert '"fontSize": 17' in r.text and '"scrollback": 12345' in r.text
+
+
+@pytest.mark.parametrize("scroll, fast", [(0.25, 1), (2.5, 7.5), (10, 20)])
+def test_view_bakes_in_the_configured_scroll_sensitivity(scroll, fast):
+    r = TestClient(_app({"scroll_sensitivity": scroll, "fast_scroll_sensitivity": fast})).get("/plugins/terminal/view")
+    assert r.status_code == 200
+    config = json.loads(r.text.split("var TERMINAL_CONFIG = ", 1)[1].split(";", 1)[0])
+    assert config["scrollSensitivity"] == scroll
+    assert config["fastScrollSensitivity"] == fast
+
+
+@pytest.mark.parametrize(
+    "value, scroll, fast",
+    [
+        (None, 2, 5),
+        ("", 2, 5),
+        ("junk", 2, 5),
+        ([], 2, 5),
+        ({}, 2, 5),
+        ("nan", 2, 5),
+        (float("inf"), 2, 5),
+        (float("-inf"), 2, 5),
+        (-100, 0.25, 1),
+        (100, 10, 20),
+        (0.25, 0.25, 1),
+        (1, 1, 1),
+        (10, 10, 10),
+        (20, 10, 20),
+        (2.5, 2.5, 2.5),
+        ("3.75", 3.75, 3.75),
+    ],
+)
+def test_resolve_scroll_sensitivity(value, scroll, fast):
+    cfg = api.resolve({"scroll_sensitivity": value, "fast_scroll_sensitivity": value})
+    assert cfg["scroll_sensitivity"] == scroll
+    assert cfg["fast_scroll_sensitivity"] == fast
+
+
+def test_resolve_scroll_sensitivity_defaults():
+    cfg = api.resolve(None)
+    assert cfg["scroll_sensitivity"] == 2
+    assert cfg["fast_scroll_sensitivity"] == 5
+
+
+@pytest.mark.parametrize("key", ["font_size", "scrollback", "keep_alive_minutes", "max_sessions"])
+def test_resolve_existing_numeric_settings_still_use_integers(key):
+    assert api.resolve({key: "12.5"})[key] == api.DEFAULTS[key]
+    value = api.resolve({key: 12.5})[key]
+    assert value == (100 if key == "scrollback" else 12)
+    assert isinstance(value, int)
 
 
 def test_view_reads_config_live_through_a_callable():
