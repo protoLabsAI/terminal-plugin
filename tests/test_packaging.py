@@ -98,12 +98,41 @@ def test_view_page_persists_sessions():
     # config comes from the server, not hardcoded — including the scroll-speed knobs, which
     # are dead unless terminal.js actually hands them to the Terminal constructor
     assert "__TERMINAL_CONFIG__" in PAGE and "scrollback: CFG.scrollback" in app and "CFG.fontSize" in app
+    # ...with xterm's sluggish defaults (1/5) overridden, falling back to 2/5 for a
+    # standalone/older config that doesn't ship the keys
     assert (
-        "scrollSensitivity: CFG.scrollSensitivity" in app and "fastScrollSensitivity: CFG.fastScrollSensitivity" in app
+        "scrollSensitivity: CFG.scrollSensitivity || 2" in app
+        and "fastScrollSensitivity: CFG.fastScrollSensitivity || 5" in app
     )
     assert "prompt(" not in app  # inline rename — a sandboxed iframe can't rely on prompt()
     # a hidden pane is never fitted (it would shrink the shell to one row)
     assert "if (!p.el.offsetWidth || !p.el.offsetHeight) return;" in app
+
+
+def test_scroll_speed_actually_beats_xterm_defaults():
+    """r3 is a *manual* check — one wheel notch / trackpad swipe should scroll NOTICEABLY
+    more lines than before, and Alt+wheel should scroll fast. Make that repeatable instead
+    of eyeballed: pin the numbers the Terminal is really built with against xterm 5.5's own
+    defaults (scrollSensitivity 1, fastScrollSensitivity 5, fastScrollModifier "alt" — all in
+    vendor/xterm.js), so a regression that silently drops back to the sluggish 1 fails here."""
+    import re
+
+    app = _app_js()
+    normal = float(re.search(r"scrollSensitivity:\s*CFG\.scrollSensitivity\s*\|\|\s*([\d.]+)", app).group(1))
+    fast = float(re.search(r"fastScrollSensitivity:\s*CFG\.fastScrollSensitivity\s*\|\|\s*([\d.]+)", app).group(1))
+    # a plain notch now moves MORE than xterm's old default of 1 → "noticeably more than before"
+    assert normal > 1, normal
+    # Alt+wheel stays the fast path: we never override xterm's "alt" fastScrollModifier, and the
+    # fast multiplier beats a plain notch, so the Alt boost is real (not a no-op)
+    assert "fastScrollModifier" not in app, "overriding fastScrollModifier would move Alt+wheel off Alt"
+    assert fast > normal, (fast, normal)
+
+    # ...and the server config feeding CFG ships the same faster-than-default numbers, so the
+    # whole path (config → CFG → Terminal) delivers the fix — not just the standalone fallback.
+    from terminal.api import DEFAULTS
+
+    assert DEFAULTS["scroll_sensitivity"] > 1, DEFAULTS["scroll_sensitivity"]
+    assert DEFAULTS["fast_scroll_sensitivity"] > DEFAULTS["scroll_sensitivity"], DEFAULTS
 
 
 def test_renaming_a_tab_cannot_change_the_layout():
