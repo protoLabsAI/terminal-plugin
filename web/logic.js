@@ -197,3 +197,43 @@ export function authCredential({ ticket, base, token }) {
   if (/^\/agents\/[^/]+/.test(base || "")) return null;
   return { token: token || "" };
 }
+
+// ── deferred renderer upgrade ───────────────────────────────────────────────────
+// Creating a WebGL context and compiling its shaders is one long synchronous block inside
+// the vendored addon (hundreds of ms on a cold GPU cache or software GL). The view is a
+// same-origin iframe, so that block freezes the whole console. Panes therefore open on the
+// cheap canvas renderer and are upgraded to WebGL later, ONE pane per scheduled turn, and
+// only once a pane is laid out (a hidden tab's panes wait until it is shown).
+//
+//   schedule(fn) — run fn on a later turn, after a paint (rAF+timeout / requestIdleCallback)
+//   ready(item)  — true when the item can be upgraded now (visible, laid out)
+//   alive(item)  — false once the item is gone (closed); it is dropped from the queue
+//   upgrade(item)
+//
+// add() and kick() never upgrade synchronously; kick() is cheap and safe to call often (on
+// every fit) — it schedules at most one turn at a time, and only when a queued item is ready.
+export function createUpgradeQueue({ schedule, ready, alive = () => true, upgrade }) {
+  const items = [];
+  let pending = false;
+  const prune = () => { for (let i = items.length - 1; i >= 0; i--) if (!alive(items[i])) items.splice(i, 1); };
+  function turn() {
+    pending = false;
+    prune();
+    const i = items.findIndex((x) => ready(x));
+    if (i < 0) return;   // nothing visible yet — a later kick() resumes
+    const [item] = items.splice(i, 1);
+    try { upgrade(item); } finally { kick(); }
+  }
+  function kick() {
+    if (pending) return;
+    prune();
+    if (!items.some((x) => ready(x))) return;
+    pending = true;
+    schedule(turn);
+  }
+  return {
+    add(item) { if (!items.includes(item)) items.push(item); kick(); },
+    kick,
+    get size() { prune(); return items.length; },
+  };
+}

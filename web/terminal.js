@@ -1,14 +1,14 @@
 // The terminal view app. Loaded by the page's bootstrap (view.py) AFTER the DS kit and the
 // vendored xterm bundles; `boot(ctx)` receives { kit, BASE, CFG, xt } where xt holds the
-// xterm constructors. Pure logic lives in logic.js (keys, theme, labels) and layout.js
-// (split-pane trees).
+// xterm constructors (xt.webgl: a promise of the WebGL addon, which may still be loading).
+// Pure logic lives in logic.js (keys, theme, labels) and layout.js (split-pane trees).
 //
 // Model: TABS hold a layout tree of PANES (layout.js). Each pane is one xterm attached over
 // its own WebSocket to a server-side shell by id. Shells OUTLIVE the socket (sessions.py):
 // the view stays mounted while hidden, remembers tabs + layouts across reloads, and
 // reattaches (replaying missed output) after a drop. Closing a pane or tab ends its shells.
 
-import { keyAction, buildTheme, tabLabel, clampFont, authCredential } from "./logic.js";
+import { keyAction, buildTheme, tabLabel, clampFont, authCredential, createUpgradeQueue } from "./logic.js";
 import { leaf, panesOf, split, remove, neighbor, resize, mapPanes, validate } from "./layout.js";
 
 const IS_MAC = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
@@ -16,7 +16,10 @@ const $ = (id) => document.getElementById(id);
 const dim = (t) => "\r\n\x1b[2m" + t + "\x1b[0m\r\n";
 
 export function boot({ kit, BASE, CFG, xt }) {
-  const { Terminal, FitAddon, WebLinksAddon, CanvasAddon, WebglAddon, SearchAddon, Unicode11Addon } = xt;
+  const { Terminal, FitAddon, WebLinksAddon, CanvasAddon, SearchAddon, Unicode11Addon } = xt;
+  // The WebGL addon may still be loading (the bootstrap hands a promise, xt.webgl, so its
+  // 100 KB never holds up the first paint); an older bootstrap passes the class directly.
+  let WebglAddon = xt.WebglAddon || null;
   const inFrame = window.parent !== window;
   const post = (msg) => { if (inFrame) parent.postMessage(msg, "*"); };
 
@@ -119,6 +122,7 @@ export function boot({ kit, BASE, CFG, xt }) {
   // prompt and garbling any TUI running in it.
   function fit(p) {
     if (!p.el.offsetWidth || !p.el.offsetHeight) return;
+    upgrades.kick();   // a pane just became visible → its WebGL upgrade may run now
     try { p.fit.fit(); } catch (e) {}
     if (p.term.cols !== p.sentCols || p.term.rows !== p.sentRows) {
       p.sentCols = p.term.cols; p.sentRows = p.term.rows;
@@ -360,20 +364,48 @@ export function boot({ kit, BASE, CFG, xt }) {
   }
 
   // ── renderer ──────────────────────────────────────────────────────────────────
-  // WebGL first (fastest; draws block/box glyphs as exact cell shapes with customGlyphs),
-  // canvas when WebGL is unavailable or its context is lost (browsers cap live contexts —
-  // many panes can hit it), and xterm's DOM renderer as the last resort.
-  function attachRenderer(term) {
-    const canvas = () => { try { term.loadAddon(new CanvasAddon()); } catch (e) {} };
-    if (WebglAddon) {
-      try {
-        const gl = new WebglAddon();
-        gl.onContextLoss(() => { try { gl.dispose(); } catch (e) {} canvas(); });
-        term.loadAddon(gl);
-        return;
-      } catch (e) { /* no WebGL here */ }
-    }
-    canvas();
+  // WebGL is the renderer (fastest; draws block/box glyphs as exact cell shapes with
+  // customGlyphs), canvas when WebGL is unavailable or its context is lost (browsers cap
+  // live contexts — many panes can hit it), and xterm's DOM renderer as the last resort.
+  //
+  // But creating a WebGL context + compiling its shaders is one long SYNCHRONOUS block in
+  // the vendored addon — measured at 150–900 ms on a cold GPU cache or software GL — and
+  // this page is a same-origin iframe, so that block froze the whole console on the
+  // view's first mount. So a pane opens on the canvas renderer (cheap; it paints at once)
+  // and is upgraded to WebGL after the first paint, one pane per turn, once it is visible.
+  // Two frames, then a macrotask: the canvas frame is committed and on screen first. Then
+  // idle time where the browser has it (requestIdleCallback; WebKit lacks it).
+  const afterPaint = (fn) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(() => {
+    if (typeof requestIdleCallback === "function") requestIdleCallback(fn, { timeout: 500 });
+    else fn();
+  }, 0)));
+  const attachCanvas = (p) => {
+    p.canvas = null;
+    try { const c = new CanvasAddon(); p.term.loadAddon(c); p.canvas = c; } catch (e) { /* DOM renderer */ }
+  };
+  function upgradeToWebgl(p) {
+    if (!WebglAddon || p.closing || p.gl) return;
+    // Drop the canvas renderer first: disposing it AFTER would put the DOM renderer back
+    // over WebGL. Same turn, so nothing paints in between.
+    try { if (p.canvas) p.canvas.dispose(); } catch (e) {}
+    p.canvas = null;
+    try {
+      const gl = new WebglAddon();
+      gl.onContextLoss(() => { try { gl.dispose(); } catch (e) {} p.gl = null; attachCanvas(p); });
+      p.term.loadAddon(gl);
+      p.gl = gl;
+    } catch (e) { attachCanvas(p); /* no WebGL here */ }
+  }
+  const upgrades = createUpgradeQueue({
+    schedule: afterPaint,
+    ready: (p) => !!WebglAddon && p.el.isConnected && p.el.offsetWidth > 0 && p.el.offsetHeight > 0,
+    alive: (p) => !p.closing && panes.has(p.id),
+    upgrade: upgradeToWebgl,
+  });
+  Promise.resolve(xt.webgl).then((C) => { if (C) WebglAddon = C; upgrades.kick(); }, () => {});
+  function attachRenderer(p) {
+    attachCanvas(p);
+    upgrades.add(p);
   }
 
   // ── panes ─────────────────────────────────────────────────────────────────────
@@ -398,9 +430,8 @@ export function boot({ kit, BASE, CFG, xt }) {
     // let the first renderLayout + fit size it.
     $("staging").appendChild(el);
     term.open(host);
-    attachRenderer(term);
 
-    const p = { id, tabId, sessionId: session || null, cwdFrom, origin: "operator", title: "", term, fit: fitA, search,
+    const p = { id, tabId, sessionId: session || null, cwdFrom, origin: "operator", title: "", term, fit: fitA, search, canvas: null, gl: null,
                 ws: null, el, status: "connecting…", statusCls: "", exited: false, detached: false, closing: false,
                 retry: 0, retryTimer: 0, fatal: "", meta: "", sentCols: 0, sentRows: 0 };
 
@@ -425,6 +456,7 @@ export function boot({ kit, BASE, CFG, xt }) {
       });
     }
     panes.set(id, p);
+    attachRenderer(p);
     connect(p);
     return p;
   }
