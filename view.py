@@ -157,15 +157,20 @@ function loadScript(src){
 }
 const ST = BASE + "/plugins/terminal/static/";
 const fail = (e) => { const el = document.getElementById("err"); el.hidden = false; el.textContent = "Could not load the terminal. " + e; throw e; };
+const g = (name) => (window[name] && window[name][name]) || null;
+// The WebGL addon is NOT awaited: panes open on the canvas renderer and terminal.js upgrades
+// them to WebGL after the first paint (see its "renderer" section) — so the first mount
+// never runs WebGL's long synchronous init on the console's main thread.
+let webgl = Promise.resolve(null);
 try {
   await loadScript(ST + "xterm.js");
+  webgl = loadScript(ST + "addon-webgl.js").then(() => g("WebglAddon"), () => null);
   await Promise.all(["addon-fit.js", "addon-web-links.js", "addon-canvas.js"].map((f) => loadScript(ST + f)));
-  await Promise.allSettled(["addon-webgl.js", "addon-search.js", "addon-unicode11.js"].map((f) => loadScript(ST + f)));
+  await Promise.allSettled(["addon-search.js", "addon-unicode11.js"].map((f) => loadScript(ST + f)));
 } catch (e) { fail(e); }
-const g = (name) => (window[name] && window[name][name]) || null;
 const xt = {
   Terminal: window.Terminal, FitAddon: g("FitAddon"), WebLinksAddon: g("WebLinksAddon"), CanvasAddon: g("CanvasAddon"),
-  WebglAddon: g("WebglAddon"), SearchAddon: g("SearchAddon"), Unicode11Addon: g("Unicode11Addon"),
+  webgl, SearchAddon: g("SearchAddon"), Unicode11Addon: g("Unicode11Addon"),
 };
 let app;
 try { app = await import(ST + "terminal.js"); } catch (e) { fail(e); }
