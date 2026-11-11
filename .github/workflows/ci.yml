@@ -1,8 +1,8 @@
 name: CI
 
-# Lint + test on the org's Namespace Linux profile (override NSC_RUNNER on a fork
-# that lacks it). The suite is host-free (only requirements-dev.txt) and spawns real
-# PTYs (Linux runners have them), so it exercises the actual shell bridge.
+# Lint + test on a GitHub-hosted runner (ubuntu-latest). The suite is host-free (only
+# requirements-dev.txt) and spawns real PTYs (Linux runners have them), so it exercises the
+# actual shell bridge.
 on:
   pull_request:
   push:
@@ -11,7 +11,7 @@ on:
 
 jobs:
   test:
-    runs-on: ${{ vars.NSC_RUNNER || 'namespace-profile-protolabs-linux' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 8   # safety net — these tests drive real PTYs + a WebSocket
     steps:
       - uses: actions/checkout@v4
